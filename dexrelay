@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+resolve_script_path() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "$source" ]]; do
+    local dir
+    dir="$(cd "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  cd "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_path)"
 INSTALL_SCRIPT="${CODEX_RELAY_INSTALL_SCRIPT:-$SCRIPT_DIR/install.sh}"
 PAYLOAD_ROOT="${CODEX_RELAY_LOCAL_PAYLOAD_ROOT:-$SCRIPT_DIR}"
-VERSION="${CODEX_RELAY_CLI_VERSION:-0.1.21}"
+VERSION="${CODEX_RELAY_CLI_VERSION:-}"
+if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
+  VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
+fi
+VERSION="${VERSION:-0.1.23}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 LEGACY_RUNTIME_ROOT="$HOME/src/CodexRelayBackendBootstrap"
 

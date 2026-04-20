@@ -1,14 +1,66 @@
 {
-  "name": "codex-ws-bridge",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "dexrelay",
+  "version": "0.1.23",
+  "description": "Mac-side CLI/bootstrap runtime for the DexRelay iPhone app.",
+  "main": "bridge.js",
+  "bin": {
+    "dexrelay": "cli.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "files": [
+    "cli.js",
+    "LICENSE",
+    "README.md",
+    "bridge.js",
+    "codex-health-daemon.py",
+    "create-mac-project.sh",
+    "dexrelay",
+    "dexrelay-skill.md",
+    "git-project-automation.sh",
+    "governancectl.py",
+    "health-ui-app.js",
+    "health-ui-index.html",
+    "health-ui-styles.css",
+    "helper.py",
+    "install.sh",
+    "ios_testflight_common.py",
+    "migrate-dexrelay-state.py",
+    "og-dexrelay-2x.png",
+    "og-dexrelay.png",
+    "package.json",
+    "prepare-ios-testflight.py",
+    "publish-ios-adhoc-ota.sh",
+    "rebuild-workspace-services.py",
+    "relay-connector.js",
+    "relay-server.js",
+    "run-ios-device.sh",
+    "run-ios-on-phone.sh",
+    "servicectl.py",
+    "services.registry.json",
+    "setup-guide.html",
+    "xcode-devdir.sh"
+  ],
+  "scripts": {
+    "test": "./dexrelay version"
+  },
+  "keywords": [
+    "dexrelay",
+    "codex",
+    "mac",
+    "ios",
+    "cli",
+    "bootstrap"
+  ],
+  "author": "DexRelay",
+  "license": "MIT",
+  "homepage": "https://github.com/dexrelay-app/dexrelay#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dexrelay-app/dexrelay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dexrelay-app/dexrelay/issues"
+  },
+  "preferGlobal": true,
   "type": "commonjs",
   "dependencies": {
     "qrcode-terminal": "^0.12.0",

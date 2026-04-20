@@ -14,6 +14,18 @@ Recommended:
 brew install dexrelay-app/dexrelay/dexrelay && dexrelay install
 ```
 
+NPM global:
+
+```bash
+npm i -g dexrelay
+```
+
+NPM one-shot:
+
+```bash
+npx dexrelay install
+```
+
 Fallback:
 
 ```bash
@@ -61,4 +73,3 @@ Not included:
 - the proprietary DexRelay iOS app
 - private internal docs
 - private build/release credentials
-
