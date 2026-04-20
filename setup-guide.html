@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Relay Setup Guide</title>
+  <style>
+    :root {
+      --bg: #eeece7;
+      --panel: #f7f5f0;
+      --panel-strong: #e5e1d7;
+      --line: rgba(34, 34, 34, 0.14);
+      --line-strong: rgba(34, 34, 34, 0.24);
+      --text: #1c1a17;
+      --muted: #666158;
+      --accent: #9a6a25;
+      --accent-soft: rgba(154, 106, 37, 0.12);
+      --success: #2e6c46;
+      --warning: #8c5d18;
+      --radius-lg: 28px;
+      --radius-md: 18px;
+      --radius-sm: 12px;
+      --shadow: 0 20px 40px rgba(40, 34, 24, 0.08);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(255,255,255,0.7), transparent 30%),
+        linear-gradient(180deg, #f4f1ea 0%, var(--bg) 100%);
+    }
+
+    .page {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+
+    .hero {
+      background: linear-gradient(145deg, rgba(255,255,255,0.74), rgba(229,225,215,0.92));
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(154, 106, 37, 0.18);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 16px 0 12px;
+      font-size: clamp(34px, 5vw, 56px);
+      line-height: 0.95;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p,
+    .intro p,
+    .step p,
+    .faq p,
+    li {
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    .quick-grid,
+    .steps,
+    .faq-grid {
+      display: grid;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .quick-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .steps,
+    .faq-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .panel,
+    .step,
+    .faq {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      padding: 18px;
+    }
+
+    .panel strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .step {
+      overflow: hidden;
+    }
+
+    .step-head {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 22px 22px 0;
+    }
+
+    .step-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font-weight: 800;
+    }
+
+    .step h2 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+
+    .step-body {
+      padding: 8px 22px 22px;
+    }
+
+    .checklist {
+      margin: 16px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+
+    .checklist li {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .checklist li::before {
+      content: "•";
+      color: var(--accent);
+      font-weight: 900;
+      font-size: 20px;
+      line-height: 1;
+      margin-top: 2px;
+    }
+
+    .code-block {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line);
+      background: #f0ede6;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #2c2a26;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    button,
+    .link-button {
+      appearance: none;
+      border: 1px solid var(--line-strong);
+      background: white;
+      color: var(--text);
+      border-radius: 999px;
+      padding: 11px 16px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 140ms ease, transform 140ms ease, border-color 140ms ease;
+    }
+
+    button:hover,
+    .link-button:hover {
+      background: #fcfbf7;
+      border-color: rgba(34, 34, 34, 0.28);
+      transform: translateY(-1px);
+    }
+
+    .primary {
+      background: var(--text);
+      color: #f8f5ef;
+      border-color: var(--text);
+    }
+
+    .primary:hover {
+      background: #2b2824;
+      border-color: #2b2824;
+    }
+
+    .micro {
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 14px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+      background: white;
+      color: var(--muted);
+    }
+
+    .ok { color: var(--success); }
+    .warn { color: var(--warning); }
+
+    .faq {
+      padding: 22px;
+    }
+
+    .faq h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+
+    .section-title {
+      margin: 40px 0 14px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .footer-note {
+      margin-top: 28px;
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      border: 1px dashed var(--line-strong);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (min-width: 860px) {
+      .steps {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .steps .step.wide,
+      .faq-grid .faq.wide {
+        grid-column: 1 / -1;
+      }
+
+      .faq-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="eyebrow">Codex Relay Setup</div>
+      <h1>Set up the Mac once. Then drive Codex from the phone.</h1>
+      <p>This page is the Mac-side onboarding companion for Codex Relay. It explains the order clearly, gives you the exact install command, and includes the helper endpoint if you want the phone to trigger setup later.</p>
+
+      <div class="quick-grid">
+        <article class="panel">
+          <strong>Required first</strong>
+          Tailscale on both devices, same account, both showing <code>Connected</code>.
+        </article>
+        <article class="panel">
+          <strong>Bootstrap relay</strong>
+          Isolated onboarding relay runs on <code>ws://&lt;mac-host&gt;:4615</code>.
+        </article>
+        <article class="panel">
+          <strong>Setup helper</strong>
+          Optional helper listens on <code>http://&lt;mac-host&gt;:4616</code>.
+        </article>
+        <article class="panel">
+          <strong>Project edits</strong>
+          Codex edits the project folder you later choose, typically under <code>~/src/&lt;project&gt;</code>.
+        </article>
+      </div>
+    </section>
+
+    <div class="section-title">Setup Steps</div>
+    <section class="steps">
+      <article class="step">
+        <div class="step-head">
+          <div class="step-badge">1</div>
+          <div>
+            <h2>Install Tailscale</h2>
+            <p>Do this before anything else. If the phone and Mac are not connected on the same tailnet, every Codex setup step after this is pointless.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <ul class="checklist">
+            <li>Create or sign in with the same Tailscale account on iPad or iPhone and Mac.</li>
+            <li>Install Tailscale on both devices.</li>
+            <li>Approve the VPN permission on iOS or iPadOS if Tailscale asks.</li>
+            <li>Confirm both devices show <code>Connected</code>.</li>
+          </ul>
+          <div class="actions">
+            <a class="link-button primary" href="https://tailscale.com/download">Open Tailscale Downloads</a>
+            <a class="link-button" href="https://tailscale.com/signup">Create Tailscale Account</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="step-head">
+          <div class="step-badge">2</div>
+          <div>
+            <h2>Find the Mac address</h2>
+            <p>The phone should not guess the Mac host. Enter the Mac Tailscale IP or MagicDNS hostname manually in Setup Mode.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <ul class="checklist">
+            <li>In the Tailscale app on the Mac, find the device address.</li>
+            <li>Use either a <code>100.x.x.x</code> IP or a MagicDNS hostname such as <code>macbook-air.tailnet.ts.net</code>.</li>
+            <li>Enter that value into the app’s <code>Mac Tailscale IP or hostname</code> field.</li>
+          </ul>
+          <div class="code-block">Examples
+100.101.102.103
+macbook-air.tailnet.ts.net</div>
+        </div>
+      </article>
+
+      <article class="step wide">
+        <div class="step-head">
+          <div class="step-badge">3</div>
+          <div>
+            <h2>Install DexRelay on your Mac</h2>
+            <p>Use the Homebrew command first. If Homebrew is not available on the Mac, use the curl fallback instead.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <div class="status warn">Phone-triggered setup only works after a trusted helper already exists on the Mac.</div>
+
+          <ul class="checklist">
+            <li>Helper status endpoint: <code>http://&lt;mac-host&gt;:4616/api/helper/status</code></li>
+            <li>Helper install trigger: <code>POST http://&lt;mac-host&gt;:4616/api/helper/setup</code></li>
+            <li>Preferred first install:</li>
+          </ul>
+
+          <div class="code-block" id="install-command">brew tap dexrelay-app/dexrelay && brew install dexrelay && dexrelay install</div>
+          <div class="actions">
+            <button class="primary" data-copy-target="install-command">Copy Homebrew Install</button>
+            <a class="link-button" href="https://assets.dexrelay.app/install.sh">Open Raw Install Script</a>
+          </div>
+
+          <div class="code-block" id="curl-install-command">curl -fsSL https://assets.dexrelay.app/install.sh | bash</div>
+          <div class="actions">
+            <button data-copy-target="curl-install-command">Copy Curl Fallback</button>
+          </div>
+
+          <div class="micro">The installer sets up Codex CLI, Node, Python, the isolated bridge on port <code>4615</code>, and the setup helper on port <code>4616</code>.</div>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="step-head">
+          <div class="step-badge">4</div>
+          <div>
+            <h2>Connect and log in</h2>
+            <p>Once the Mac runtime exists, the phone connects to the bootstrap relay and starts OpenAI login. The authenticated runtime stays on the Mac.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <ul class="checklist">
+            <li>Connect the phone to <code>ws://&lt;mac-host&gt;:4615</code> in Setup Mode.</li>
+            <li>Tap <code>Start OpenAI Login</code> on the phone.</li>
+            <li>Finish the device login flow using the account you want the Mac runtime to own.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="step-head">
+          <div class="step-badge">5</div>
+          <div>
+            <h2>Permissions and projects</h2>
+            <p>Keep permissions narrow. The phone needs network access and Tailscale approval; the Mac runtime needs install and file execution permission during setup.</p>
+          </div>
+        </div>
+        <div class="step-body">
+          <ul class="checklist">
+            <li>Phone: approve Tailscale VPN access if prompted.</li>
+            <li>Mac: approve Homebrew, Node, Python, Codex, and launchd installation steps if macOS asks.</li>
+            <li>After login, choose the project folder Codex should work in, usually under <code>~/src</code>.</li>
+          </ul>
+        </div>
+      </article>
+    </section>
+
+    <div class="section-title">Useful Endpoints</div>
+    <section class="faq-grid">
+      <article class="faq">
+        <h3>Bootstrap Relay</h3>
+        <p>After install, the isolated onboarding relay listens here:</p>
+        <div class="code-block" id="bootstrap-endpoint">ws://&lt;mac-host&gt;:4615</div>
+        <div class="actions">
+          <button data-copy-target="bootstrap-endpoint">Copy Endpoint</button>
+        </div>
+      </article>
+
+      <article class="faq">
+        <h3>Setup Helper</h3>
+        <p>If present, the phone can query or trigger setup through:</p>
+        <div class="code-block" id="helper-endpoints">GET  http://&lt;mac-host&gt;:4616/api/helper/status
+POST http://&lt;mac-host&gt;:4616/api/helper/setup</div>
+        <div class="actions">
+          <button data-copy-target="helper-endpoints">Copy Helper Endpoints</button>
+        </div>
+      </article>
+
+      <article class="faq wide">
+        <h3>Cloudflare Assets</h3>
+        <p>These are the exact public files the onboarding runtime uses:</p>
+        <div class="code-block" id="assets-list">https://assets.dexrelay.app/install.sh
+https://assets.dexrelay.app/bridge.js
+https://assets.dexrelay.app/package.json
+https://assets.dexrelay.app/helper.py
+https://assets.dexrelay.app/create-mac-project.sh
+https://assets.dexrelay.app/git-project-automation.sh
+https://assets.dexrelay.app/governancectl.py
+https://assets.dexrelay.app/services.registry.json
+https://assets.dexrelay.app/setup-guide.html
+https://assets.dexrelay.app/dexrelay-skill.md</div>
+        <div class="actions">
+          <button data-copy-target="assets-list">Copy Asset URLs</button>
+        </div>
+      </article>
+    </section>
+
+    <div class="section-title">FAQ</div>
+    <section class="faq-grid">
+      <article class="faq">
+        <h3>Why did the phone not ask me to log in before?</h3>
+        <p>Because the Mac runtime owns the login. If the Mac was already authenticated, a phone that reaches the relay can use that existing session immediately.</p>
+      </article>
+
+      <article class="faq">
+        <h3>Why can’t the phone always run setup by itself?</h3>
+        <p>A blank Mac has nothing trustworthy listening yet. The helper solves this later, but the first install still needs one approved bootstrap command or another preinstalled helper.</p>
+      </article>
+
+      <article class="faq">
+        <h3>Where does Codex edit files?</h3>
+        <p>The phone sends the chosen working directory to the Mac-hosted runtime. Codex then edits that project folder on the Mac, not the bootstrap runtime folder itself.</p>
+      </article>
+
+      <article class="faq">
+        <h3>Can this live as a static page?</h3>
+        <p>Yes. This file is fully self-contained and can be uploaded as a static Cloudflare page or opened directly on the MacBook in a browser.</p>
+      </article>
+    </section>
+
+    <div class="footer-note">
+      Internal source of truth: <code>bootstrap-payload/setup-guide.html</code> and <code>scripts/onboarding/install-codex-relay-mac.sh</code>.
+    </div>
+  </main>
+
+  <script>
+    document.querySelectorAll("[data-copy-target]").forEach(function (button) {
+      button.addEventListener("click", async function () {
+        var targetId = button.getAttribute("data-copy-target");
+        var target = document.getElementById(targetId);
+        if (!target) return;
+        try {
+          await navigator.clipboard.writeText(target.textContent.trim());
+          var previous = button.textContent;
+          button.textContent = "Copied";
+          setTimeout(function () {
+            button.textContent = previous;
+          }, 1400);
+        } catch (error) {
+          window.alert("Copy failed. You can still select the text manually.");
+        }
+      });
+    });
+  </script>
+</body>
+</html>

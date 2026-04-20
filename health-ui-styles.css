@@ -1,0 +1,150 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #efede6;
+  color: #151515;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+}
+
+.shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 28px 18px 48px;
+}
+
+.hero {
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #5f5a52;
+}
+
+h1, h2, h3, p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 32px;
+  line-height: 1;
+}
+
+.subhead {
+  margin-top: 8px;
+  font-size: 15px;
+  color: #575149;
+}
+
+.panel {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #d4cec2;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.status-line {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-weight: 700;
+  background: #ece6da;
+}
+
+.status-line[data-state="ok"] {
+  background: #dce8d1;
+}
+
+.status-line[data-state="warn"] {
+  background: #f2e4bf;
+}
+
+.status-line[data-state="failed"] {
+  background: #edd2cf;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.card {
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid #ddd6ca;
+  background: #f7f4ee;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.card h3 {
+  font-size: 16px;
+}
+
+.card span {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #5a544c;
+}
+
+.card[data-state="ok"] {
+  background: #edf4e4;
+}
+
+.card[data-state="warn"] {
+  background: #fbf3dd;
+}
+
+.card[data-state="failed"] {
+  background: #f8e5e2;
+}
+
+.card p, .row span {
+  color: #565047;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.list {
+  margin-top: 14px;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid #e1dbcf;
+}
+
+.row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.row strong {
+  font-size: 14px;
+}
+
+.muted {
+  color: #70695f;
+}

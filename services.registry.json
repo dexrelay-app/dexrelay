@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "portPolicy": {
+    "min": 8000,
+    "max": 8999,
+    "reserved": [
+      4500,
+      4600,
+      4610,
+      4615,
+      4616
+    ]
+  },
+  "services": [
+    {
+      "id": "xcode",
+      "name": "Xcode",
+      "projectPath": "*",
+      "healthCheck": "pgrep -x Xcode >/dev/null 2>&1",
+      "startCommand": "open -ga Xcode",
+      "restartCommand": "open -ga Xcode",
+      "ports": [],
+      "tags": [
+        "tooling",
+        "build"
+      ]
+    }
+  ]
+}

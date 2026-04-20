@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_SCRIPT="${CODEX_RELAY_INSTALL_SCRIPT:-$SCRIPT_DIR/install.sh}"
+PAYLOAD_ROOT="${CODEX_RELAY_LOCAL_PAYLOAD_ROOT:-$SCRIPT_DIR}"
+VERSION="${CODEX_RELAY_CLI_VERSION:-0.1.21}"
+DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
+LEGACY_RUNTIME_ROOT="$HOME/src/CodexRelayBackendBootstrap"
+
+runtime_root_ready() {
+  local root="$1"
+  [[ -f "$root/scripts/governancectl.py" || -f "$root/helper/helper.py" || -f "$root/bin/start-helper.sh" ]]
+}
+
+resolve_runtime_root() {
+  if [[ -n "${CODEX_RELAY_ROOT:-}" ]]; then
+    printf '%s\n' "$CODEX_RELAY_ROOT"
+  elif runtime_root_ready "$DEFAULT_RUNTIME_ROOT"; then
+    printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
+  elif runtime_root_ready "$LEGACY_RUNTIME_ROOT"; then
+    printf '%s\n' "$LEGACY_RUNTIME_ROOT"
+  else
+    printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
+  fi
+}
+
+RUNTIME_ROOT="$(resolve_runtime_root)"
+BRIDGE_PORT="${CODEX_RELAY_BRIDGE_PORT:-4615}"
+HELPER_PORT="${CODEX_RELAY_HELPER_PORT:-4616}"
+RELAY_SERVER_PORT="${CODEX_RELAY_SERVER_PORT:-4620}"
+BRIDGE_LABEL="${CODEX_RELAY_BRIDGE_LABEL:-com.codexrelay.bootstrap}"
+HELPER_LABEL="${CODEX_RELAY_HELPER_LABEL:-com.codexrelay.setuphelper}"
+WATCHDOG_LABEL="${CODEX_RELAY_WATCHDOG_LABEL:-com.codexrelay.watchdog.bootstrap}"
+KEEP_AWAKE_LABEL="${CODEX_RELAY_KEEP_AWAKE_LABEL:-com.codexrelay.keepawake.bootstrap}"
+RELAY_SERVER_LABEL="${CODEX_RELAY_RELAY_SERVER_LABEL:-com.codexrelay.relayserver.bootstrap}"
+RELAY_CONNECTOR_LABEL="${CODEX_RELAY_RELAY_CONNECTOR_LABEL:-com.codexrelay.relayconnector.bootstrap}"
+BRIDGE_PLIST="${CODEX_RELAY_BRIDGE_PLIST:-$HOME/Library/LaunchAgents/${BRIDGE_LABEL}.plist}"
+HELPER_PLIST="${CODEX_RELAY_HELPER_PLIST:-$HOME/Library/LaunchAgents/${HELPER_LABEL}.plist}"
+WATCHDOG_PLIST="${CODEX_RELAY_WATCHDOG_PLIST:-$HOME/Library/LaunchAgents/${WATCHDOG_LABEL}.plist}"
+KEEP_AWAKE_PLIST="${CODEX_RELAY_KEEP_AWAKE_PLIST:-$HOME/Library/LaunchAgents/${KEEP_AWAKE_LABEL}.plist}"
+RELAY_SERVER_PLIST="${CODEX_RELAY_RELAY_SERVER_PLIST:-$HOME/Library/LaunchAgents/${RELAY_SERVER_LABEL}.plist}"
+RELAY_CONNECTOR_PLIST="${CODEX_RELAY_RELAY_CONNECTOR_PLIST:-$HOME/Library/LaunchAgents/${RELAY_CONNECTOR_LABEL}.plist}"
+HELPER_URL="http://127.0.0.1:${HELPER_PORT}/api/helper/status"
+HELPER_STATE_DIR="${CODEX_RELAY_HELPER_STATE_DIR:-$HOME/Library/Application Support/CodexRelayHelper}"
+BRIDGE_LOG_DIR="${CODEX_RELAY_BRIDGE_LOG_DIR:-$HOME/Library/Logs/CodexRelayBootstrap}"
+HELPER_LOG_DIR="${CODEX_RELAY_HELPER_LOG_DIR:-$HOME/Library/Logs/CodexRelayHelper}"
+RELAY_STATE_DIR="${CODEX_RELAY_RELAY_STATE_DIR:-$RUNTIME_ROOT/relay}"
+PROJECTS_ROOT="${CODEX_RELAY_PROJECTS_ROOT:-$HOME/src}"
+ADMIN_PROJECT_ROOT="${CODEX_RELAY_ADMIN_PROJECT_ROOT:-$PROJECTS_ROOT/DexRelay Admin}"
+
+usage() {
+  cat <<'EOF'
+dexrelay
+
+Usage:
+  dexrelay install
+  dexrelay repair
+  dexrelay status
+  dexrelay pair
+  dexrelay relay-pair
+  dexrelay uninstall
+  dexrelay wake on
+  dexrelay wake off
+  dexrelay wake status
+  dexrelay doctor
+  dexrelay version
+
+Commands:
+  install   Install or update the DexRelay Mac runtime.
+  repair    Repair Tailscale, bridge/helper, and relaunch services.
+  status    Show bridge/helper, launch agent, Tailscale, and Codex health.
+  pair      Print a short-lived QR pairing code for the iPhone onboarding flow.
+  relay-pair Prepare the relay runtime automatically and print a relay bootstrap QR.
+  uninstall Remove the DexRelay runtime, launch agents, logs, and Homebrew CLI.
+  wake      Control the keep-awake launch agent (on, off, status).
+  doctor    Print the installed payload location and expected runtime paths.
+  version   Print the DexRelay CLI wrapper version.
+EOF
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+resolve_tailscale_cli() {
+  local candidate
+  for candidate in \
+    "${TAILSCALE_BIN:-}" \
+    "/opt/homebrew/bin/tailscale" \
+    "/usr/local/bin/tailscale"
+  do
+    [[ -n "$candidate" && -x "$candidate" ]] && {
+      printf '%s\n' "$candidate"
+      return 0
+    }
+  done
+
+  if command_exists tailscale; then
+    command -v tailscale
+    return 0
+  fi
+
+  return 1
+}
+
+tailscale_serve_state() {
+  local tailscale_cli="$1"
+  local status_file=""
+  status_file="$(mktemp -t dexrelay-serve-status.XXXXXX)"
+
+  if "$tailscale_cli" serve status >"$status_file" 2>&1; then
+    if grep -qi "no serve config" "$status_file"; then
+      rm -f "$status_file"
+      printf 'enabled (no routes)'
+      return 0
+    fi
+    rm -f "$status_file"
+    printf 'enabled'
+    return 0
+  fi
+
+  if grep -qi "serve is not enabled on your tailnet" "$status_file"; then
+    rm -f "$status_file"
+    printf 'tailnet policy disabled'
+    return 0
+  fi
+  if grep -qi "unknown command\\|unknown subcommand" "$status_file"; then
+    rm -f "$status_file"
+    printf 'unsupported by cli'
+    return 0
+  fi
+
+  rm -f "$status_file"
+  printf 'error'
+}
+
+json_field() {
+  local json="$1"
+  local field="$2"
+
+  [[ -n "$json" ]] || return 1
+
+  if command_exists jq; then
+    printf '%s' "$json" | jq -r --arg field "$field" '.[$field] // empty'
+    return 0
+  fi
+
+  if command_exists python3; then
+    python3 - "$field" <<'PY' <<<"$json"
+import json
+import sys
+
+field = sys.argv[1]
+data = json.load(sys.stdin)
+value = data.get(field, "")
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    pass
+else:
+    print(value)
+PY
+    return 0
+  fi
+
+  return 1
+}
+
+launch_agent_loaded() {
+  local label="$1"
+  local uid
+  uid="$(id -u)"
+
+  launchctl print "gui/$uid/$label" >/dev/null 2>&1 \
+    || launchctl print "user/$uid/$label" >/dev/null 2>&1
+}
+
+port_listening() {
+  local port="$1"
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+helper_status_json() {
+  curl -fsS --max-time 3 "$HELPER_URL" 2>/dev/null || true
+}
+
+health_check_ok() {
+  local helper_json="$1"
+  local bridge_reachable
+
+  [[ -n "$helper_json" ]] || return 1
+  bridge_reachable="$(json_field "$helper_json" "bridgeReachable" 2>/dev/null || true)"
+  [[ "$bridge_reachable" == "true" ]] || return 1
+
+  port_listening "$BRIDGE_PORT" && port_listening "$HELPER_PORT"
+}
+
+print_status_line() {
+  local label="$1"
+  local value="$2"
+  printf '%-20s %s\n' "$label" "$value"
+}
+
+restart_launch_agent() {
+  local label="$1"
+  local plist="$2"
+  local uid gui_domain user_domain
+
+  [[ -f "$plist" ]] || return 1
+
+  uid="$(id -u)"
+  gui_domain="gui/$uid"
+  user_domain="user/$uid"
+
+  launchctl bootout "$gui_domain/$label" >/dev/null 2>&1 || true
+  launchctl bootout "$user_domain/$label" >/dev/null 2>&1 || true
+  launchctl bootstrap "$gui_domain" "$plist" >/dev/null 2>&1 \
+    || launchctl bootstrap "$user_domain" "$plist" >/dev/null 2>&1 \
+    || return 1
+  launchctl enable "$gui_domain/$label" >/dev/null 2>&1 \
+    || launchctl enable "$user_domain/$label" >/dev/null 2>&1 \
+    || true
+}
+
+wait_for_port() {
+  local port="$1"
+  local attempts="${2:-10}"
+
+  while (( attempts > 0 )); do
+    if port_listening "$port"; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts - 1))
+  done
+
+  return 1
+}
+
+sleep_for_recovery() {
+  sleep 2
+}
+
+keep_awake_enabled() {
+  launch_agent_loaded "$KEEP_AWAKE_LABEL"
+}
+
+pair_request_json() {
+  curl -fsS --max-time 5 \
+    -H 'Content-Type: application/json' \
+    -d '{}' \
+    "http://127.0.0.1:${HELPER_PORT}/api/helper/pairing/request" 2>/dev/null || true
+}
+
+relay_bootstrap_request_json() {
+  curl -fsS --max-time 5 \
+    -H 'Content-Type: application/json' \
+    -d '{}' \
+    "http://127.0.0.1:${HELPER_PORT}/api/helper/relay-bootstrap/request" 2>/dev/null || true
+}
+
+render_pairing_qr() {
+  local pairing_uri="$1"
+  local runtime_module="$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+
+  if command_exists node && [[ -d "$runtime_module" ]]; then
+    PAIRING_URI="$pairing_uri" node - "$runtime_module" <<'EOF' 2>/dev/null && return 0
+const modulePath = process.argv[2];
+const pairingURI = process.env.PAIRING_URI || "";
+require(modulePath).generate(pairingURI, { small: true });
+EOF
+  fi
+
+  printf '\nQR renderer unavailable. Use the pairing URI below instead.\n'
+  return 1
+}
+
+bootout_launch_agent() {
+  local label="$1"
+  local uid gui_domain user_domain
+
+  uid="$(id -u)"
+  gui_domain="gui/$uid"
+  user_domain="user/$uid"
+
+  launchctl bootout "$gui_domain/$label" >/dev/null 2>&1 || true
+  launchctl bootout "$user_domain/$label" >/dev/null 2>&1 || true
+}
+
+write_relay_connector_env() {
+  local relay_url="$1"
+  local pairing_id="$2"
+  local bootstrap_token="$3"
+  local device_id="$4"
+  local display_name="$5"
+  local expires_at="$6"
+  local env_file="$RELAY_STATE_DIR/connector.env"
+
+  mkdir -p "$RELAY_STATE_DIR"
+  cat >"$env_file" <<EOF
+RELAY_CONNECTOR_URL="$relay_url"
+RELAY_CONNECTOR_PAIRING_ID="$pairing_id"
+RELAY_CONNECTOR_BOOTSTRAP_TOKEN="$bootstrap_token"
+RELAY_CONNECTOR_DEVICE_ID="$device_id"
+RELAY_CONNECTOR_DISPLAY_NAME="$display_name"
+RELAY_CONNECTOR_BOOTSTRAP_EXPIRES_AT="$expires_at"
+EOF
+  chmod 600 "$env_file"
+}
+
+ensure_relay_runtime_ready() {
+  if ! port_listening "$RELAY_SERVER_PORT"; then
+    restart_launch_agent "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST" >/dev/null 2>&1 || true
+    if ! wait_for_port "$RELAY_SERVER_PORT" 10; then
+      printf 'Relay server did not come online on port %s.\n' "$RELAY_SERVER_PORT" >&2
+      return 1
+    fi
+  fi
+  restart_launch_agent "$RELAY_CONNECTOR_LABEL" "$RELAY_CONNECTOR_PLIST" >/dev/null 2>&1 || true
+}
+
+status_command() {
+  local tailscale_cli="not found"
+  local tailscale_state="not connected"
+  local tailscale_serve="unknown"
+  local tailscale_identity=""
+  local helper_json=""
+  local helper_version=""
+  local helper_setup_state=""
+  local helper_bridge_reachable=""
+  local helper_dns=""
+  local helper_ip=""
+  local helper_ota_root=""
+  local codex_state="missing"
+  local bridge_agent="not loaded"
+  local helper_agent="not loaded"
+  local watchdog_agent="not loaded"
+  local relay_server_agent="not loaded"
+  local relay_connector_agent="not loaded"
+  local keep_awake_state="disabled"
+  local bridge_socket="closed"
+  local helper_socket="closed"
+  local relay_server_socket="closed"
+
+  if tailscale_cli="$(resolve_tailscale_cli 2>/dev/null)"; then
+    tailscale_state="installed"
+    tailscale_serve="$(tailscale_serve_state "$tailscale_cli")"
+    if "$tailscale_cli" status --json >/tmp/dexrelay-status.json 2>/dev/null; then
+      tailscale_state="connected"
+      if command_exists jq; then
+        tailscale_identity="$(jq -r '.Self.DNSName // (.Self.TailscaleIPs[]? | select(startswith("100."))) // empty' /tmp/dexrelay-status.json | sed 's/\.$//' | head -n1)"
+      elif command_exists python3; then
+        tailscale_identity="$(python3 - <<'PY' /tmp/dexrelay-status.json
+import json
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+self = data.get("Self", {})
+dns = (self.get("DNSName") or "").rstrip(".")
+ips = self.get("TailscaleIPs") or []
+value = dns or next((ip for ip in ips if isinstance(ip, str) and ip.startswith("100.")), "")
+print(value)
+PY
+)"
+      fi
+    fi
+    rm -f /tmp/dexrelay-status.json
+  fi
+
+  command_exists codex && codex_state="installed"
+  launch_agent_loaded "$BRIDGE_LABEL" && bridge_agent="loaded"
+  launch_agent_loaded "$HELPER_LABEL" && helper_agent="loaded"
+  launch_agent_loaded "$WATCHDOG_LABEL" && watchdog_agent="loaded"
+  launch_agent_loaded "$RELAY_SERVER_LABEL" && relay_server_agent="loaded"
+  launch_agent_loaded "$RELAY_CONNECTOR_LABEL" && relay_connector_agent="loaded"
+  keep_awake_enabled && keep_awake_state="loaded"
+  port_listening "$BRIDGE_PORT" && bridge_socket="listening"
+  port_listening "$HELPER_PORT" && helper_socket="listening"
+  port_listening "$RELAY_SERVER_PORT" && relay_server_socket="listening"
+
+  helper_json="$(helper_status_json)"
+  if [[ -n "$helper_json" ]]; then
+    helper_version="$(json_field "$helper_json" "helperVersion" 2>/dev/null || true)"
+    helper_setup_state="$(json_field "$helper_json" "setupState" 2>/dev/null || true)"
+    helper_bridge_reachable="$(json_field "$helper_json" "bridgeReachable" 2>/dev/null || true)"
+    helper_dns="$(json_field "$helper_json" "tailscaleDNSName" 2>/dev/null || true)"
+    helper_ip="$(json_field "$helper_json" "tailscaleIP" 2>/dev/null || true)"
+    helper_ota_root="$(json_field "$helper_json" "otaPublicRoot" 2>/dev/null || true)"
+  fi
+
+  printf 'DexRelay status\n'
+  printf '===============\n'
+  print_status_line "payload root" "$PAYLOAD_ROOT"
+  print_status_line "runtime root" "$RUNTIME_ROOT"
+  print_status_line "admin workspace" "$ADMIN_PROJECT_ROOT"
+  print_status_line "install script" "$INSTALL_SCRIPT"
+  print_status_line "bridge port" "$BRIDGE_PORT"
+  print_status_line "helper port" "$HELPER_PORT"
+  print_status_line "bridge agent" "$bridge_agent"
+  print_status_line "helper agent" "$helper_agent"
+  print_status_line "watchdog agent" "$watchdog_agent"
+  print_status_line "relay server agent" "$relay_server_agent"
+  print_status_line "relay connector agent" "$relay_connector_agent"
+  print_status_line "keep awake" "$keep_awake_state"
+  print_status_line "bridge socket" "$bridge_socket"
+  print_status_line "helper socket" "$helper_socket"
+  print_status_line "relay server socket" "$relay_server_socket"
+  print_status_line "tailscale cli" "$tailscale_cli"
+  print_status_line "tailscale" "$tailscale_state"
+  print_status_line "tailscale serve" "$tailscale_serve"
+  [[ -n "$tailscale_identity" ]] && print_status_line "tailscale host" "$tailscale_identity"
+  print_status_line "codex cli" "$codex_state"
+  if [[ -n "$helper_json" ]]; then
+    print_status_line "helper status" "reachable"
+    [[ -n "$helper_version" ]] && print_status_line "helper version" "$helper_version"
+    [[ -n "$helper_setup_state" ]] && print_status_line "setup state" "$helper_setup_state"
+    [[ -n "$helper_bridge_reachable" ]] && print_status_line "bridge ready" "$helper_bridge_reachable"
+    [[ -n "$helper_dns" ]] && print_status_line "helper dns" "$helper_dns"
+    [[ -n "$helper_ip" ]] && print_status_line "helper ip" "$helper_ip"
+    [[ -n "$helper_ota_root" ]] && print_status_line "ota public root" "$helper_ota_root"
+  else
+    print_status_line "helper status" "unreachable"
+  fi
+
+  if health_check_ok "$helper_json"; then
+    exit 0
+  fi
+
+  exit 1
+}
+
+repair_command() {
+  local helper_json=""
+  local tailscale_cli=""
+
+  printf 'DexRelay repair\n'
+  printf '===============\n'
+
+  if tailscale_cli="$(resolve_tailscale_cli 2>/dev/null)"; then
+    if ! "$tailscale_cli" status --json >/dev/null 2>&1; then
+      printf 'Tailscale is not connected. Attempting reconnect.\n'
+      /usr/bin/open -g -a Tailscale >/dev/null 2>&1 || true
+      "$tailscale_cli" up >/dev/null 2>&1 || true
+      sleep_for_recovery
+    fi
+  fi
+
+  if restart_launch_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"; then
+    printf 'Restarted %s\n' "$BRIDGE_LABEL"
+  else
+    printf 'Could not restart %s from %s\n' "$BRIDGE_LABEL" "$BRIDGE_PLIST"
+  fi
+
+  if restart_launch_agent "$HELPER_LABEL" "$HELPER_PLIST"; then
+    printf 'Restarted %s\n' "$HELPER_LABEL"
+  else
+    printf 'Could not restart %s from %s\n' "$HELPER_LABEL" "$HELPER_PLIST"
+  fi
+
+  if restart_launch_agent "$WATCHDOG_LABEL" "$WATCHDOG_PLIST"; then
+    printf 'Restarted %s\n' "$WATCHDOG_LABEL"
+  else
+    printf 'Could not restart %s from %s\n' "$WATCHDOG_LABEL" "$WATCHDOG_PLIST"
+  fi
+
+  if restart_launch_agent "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST"; then
+    printf 'Restarted %s\n' "$RELAY_SERVER_LABEL"
+  else
+    printf 'Could not restart %s from %s\n' "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST"
+  fi
+
+  if [[ -f "$RELAY_STATE_DIR/connector.env" ]]; then
+    if restart_launch_agent "$RELAY_CONNECTOR_LABEL" "$RELAY_CONNECTOR_PLIST"; then
+      printf 'Restarted %s\n' "$RELAY_CONNECTOR_LABEL"
+    else
+      printf 'Could not restart %s from %s\n' "$RELAY_CONNECTOR_LABEL" "$RELAY_CONNECTOR_PLIST"
+    fi
+  fi
+
+  sleep_for_recovery
+  helper_json="$(helper_status_json)"
+  if health_check_ok "$helper_json"; then
+    printf 'DexRelay bridge is healthy again.\n'
+    return 0
+  fi
+
+  printf 'Bridge still unhealthy. Running full reinstall/repair.\n'
+  export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+  exec /bin/bash "$INSTALL_SCRIPT"
+}
+
+wake_command() {
+  local action="${1:-status}"
+  case "$action" in
+    on)
+      export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+      export CODEX_RELAY_KEEP_AWAKE=1
+      exec /bin/bash "$INSTALL_SCRIPT"
+      ;;
+    off)
+      export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+      export CODEX_RELAY_KEEP_AWAKE=0
+      exec /bin/bash "$INSTALL_SCRIPT"
+      ;;
+    status)
+      if keep_awake_enabled; then
+        printf 'DexRelay keep-awake is enabled via %s\n' "$KEEP_AWAKE_LABEL"
+        exit 0
+      fi
+      printf 'DexRelay keep-awake is disabled\n'
+      exit 1
+      ;;
+    *)
+      printf 'Unknown wake action: %s\n' "$action" >&2
+      printf 'Usage: dexrelay wake [on|off|status]\n' >&2
+      exit 1
+      ;;
+  esac
+}
+
+doctor_command() {
+  cat <<EOF
+DexRelay CLI wrapper
+- version: $VERSION
+- install script: $INSTALL_SCRIPT
+- payload root: $PAYLOAD_ROOT
+- runtime root: $RUNTIME_ROOT
+- default runtime root: $DEFAULT_RUNTIME_ROOT
+- legacy runtime root: $LEGACY_RUNTIME_ROOT
+- admin workspace: $ADMIN_PROJECT_ROOT
+- relay state dir: $RELAY_STATE_DIR
+- bridge port: $BRIDGE_PORT
+- helper port: $HELPER_PORT
+- bridge launch agent: $BRIDGE_PLIST
+- helper launch agent: $HELPER_PLIST
+- watchdog launch agent: $WATCHDOG_PLIST
+- relay server launch agent: $RELAY_SERVER_PLIST
+- relay connector launch agent: $RELAY_CONNECTOR_PLIST
+- keep-awake launch agent: $KEEP_AWAKE_PLIST
+EOF
+}
+
+pair_command() {
+  local helper_json pairing_uri pairing_id expires_at preferred_host
+
+  helper_json="$(helper_status_json)"
+  if [[ -z "$helper_json" ]]; then
+    printf 'DexRelay helper is not reachable on this Mac.\n' >&2
+    printf 'Run `dexrelay install` or `dexrelay repair` first.\n' >&2
+    return 1
+  fi
+
+  helper_json="$(pair_request_json)"
+  [[ -n "$helper_json" ]] || {
+    printf 'Could not create pairing session.\n' >&2
+    return 1
+  }
+
+  pairing_uri="$(json_field "$helper_json" "pairingURI" 2>/dev/null || true)"
+  pairing_id="$(json_field "$helper_json" "pairingId" 2>/dev/null || true)"
+  preferred_host="$(json_field "$helper_json" "preferredHost" 2>/dev/null || true)"
+  expires_at="$(json_field "$helper_json" "expiresAt" 2>/dev/null || true)"
+
+  [[ -n "$pairing_uri" ]] || {
+    printf 'Pairing helper returned incomplete data.\n' >&2
+    printf '%s\n' "$helper_json" >&2
+    return 1
+  }
+
+  printf 'DexRelay pairing\n'
+  printf '================\n'
+  print_status_line "pairing id" "${pairing_id:-unknown}"
+  print_status_line "host" "$preferred_host"
+  print_status_line "expires" "${expires_at:-soon}"
+  printf '\nScan this with the iPhone app in Setup -> Connect -> Scan Connection QR.\n'
+
+  render_pairing_qr "$pairing_uri" || true
+
+  printf '\nPairing URI:\n%s\n' "$pairing_uri"
+}
+
+relay_pair_command() {
+  local helper_json relay_uri pairing_id relay_url bootstrap_token phone_device_id expires_at mac_display_name
+
+  helper_json="$(helper_status_json)"
+  if [[ -z "$helper_json" ]]; then
+    printf 'DexRelay helper is not reachable on this Mac.\n' >&2
+    printf 'Run `dexrelay install` or `dexrelay repair` first.\n' >&2
+    return 1
+  fi
+
+  helper_json="$(relay_bootstrap_request_json)"
+  [[ -n "$helper_json" ]] || {
+    printf 'Could not create relay bootstrap session.\n' >&2
+    return 1
+  }
+
+  relay_uri="$(json_field "$helper_json" "relayBootstrapURI" 2>/dev/null || true)"
+  pairing_id="$(json_field "$helper_json" "pairingId" 2>/dev/null || true)"
+  relay_url="$(json_field "$helper_json" "relayWebSocketURL" 2>/dev/null || true)"
+  bootstrap_token="$(json_field "$helper_json" "bootstrapToken" 2>/dev/null || true)"
+  phone_device_id="$(json_field "$helper_json" "phoneDeviceID" 2>/dev/null || true)"
+  expires_at="$(json_field "$helper_json" "expiresAt" 2>/dev/null || true)"
+  mac_display_name="$(json_field "$helper_json" "macDisplayName" 2>/dev/null || true)"
+
+  [[ -n "$relay_uri" && -n "$pairing_id" && -n "$relay_url" && -n "$bootstrap_token" ]] || {
+    printf 'Relay bootstrap helper returned incomplete data.\n' >&2
+    printf '%s\n' "$helper_json" >&2
+    return 1
+  }
+
+  printf 'DexRelay relay bootstrap\n'
+  printf '========================\n'
+  print_status_line "pairing id" "${pairing_id:-unknown}"
+  print_status_line "relay" "$relay_url"
+  print_status_line "phone device" "${phone_device_id:-unknown}"
+  print_status_line "expires" "${expires_at:-soon}"
+  write_relay_connector_env \
+    "$relay_url" \
+    "$pairing_id" \
+    "$bootstrap_token" \
+    "${mac_display_name:-mac-connector}" \
+    "${mac_display_name:-DexRelay Mac}" \
+    "${expires_at:-}"
+  ensure_relay_runtime_ready
+  printf 'Mac relay runtime prepared automatically.\n'
+  printf '\nScan this with the iPhone app in Setup -> Connect -> Scan Connection QR.\n'
+
+  render_pairing_qr "$relay_uri" || true
+
+  printf '\nRelay Bootstrap URI:\n%s\n' "$relay_uri"
+}
+
+uninstall_command() {
+  local current_cli=""
+  local should_uninstall_brew=0
+
+  printf 'DexRelay uninstall\n'
+  printf '==================\n'
+
+  current_cli="$(command -v dexrelay 2>/dev/null || true)"
+  if command_exists brew && brew list --formula dexrelay >/dev/null 2>&1; then
+    should_uninstall_brew=1
+  fi
+
+  printf 'Stopping launch agents.\n'
+  bootout_launch_agent "$BRIDGE_LABEL"
+  bootout_launch_agent "$HELPER_LABEL"
+  bootout_launch_agent "$WATCHDOG_LABEL"
+  bootout_launch_agent "$RELAY_SERVER_LABEL"
+  bootout_launch_agent "$RELAY_CONNECTOR_LABEL"
+  bootout_launch_agent "$KEEP_AWAKE_LABEL"
+
+  printf 'Removing launch agents.\n'
+  rm -f "$BRIDGE_PLIST" "$HELPER_PLIST" "$WATCHDOG_PLIST" "$RELAY_SERVER_PLIST" "$RELAY_CONNECTOR_PLIST" "$KEEP_AWAKE_PLIST"
+
+  printf 'Removing runtime data.\n'
+  rm -rf "$RUNTIME_ROOT" "$HELPER_STATE_DIR" "$BRIDGE_LOG_DIR" "$HELPER_LOG_DIR" "$RELAY_STATE_DIR"
+  if [[ -d "$ADMIN_PROJECT_ROOT" ]]; then
+    printf 'Preserving admin workspace at %s\n' "$ADMIN_PROJECT_ROOT"
+  fi
+
+  if [[ $should_uninstall_brew -eq 1 ]]; then
+    printf 'Removing Homebrew formula.\n'
+    brew uninstall --formula dexrelay >/dev/null
+  else
+    printf 'Homebrew formula not installed. Skipping CLI uninstall.\n'
+  fi
+
+  printf 'DexRelay has been removed from this Mac.\n'
+  if [[ -n "$current_cli" ]]; then
+    printf 'If your current shell still resolves %s, open a new shell to refresh PATH.\n' "$current_cli"
+  fi
+}
+
+cmd="${1:-install}"
+
+case "$cmd" in
+  install)
+    shift || true
+    export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+    exec /bin/bash "$INSTALL_SCRIPT" "$@"
+    ;;
+  repair)
+    shift || true
+    repair_command "$@"
+    ;;
+  status)
+    shift || true
+    status_command "$@"
+    ;;
+  pair)
+    shift || true
+    pair_command "$@"
+    ;;
+  relay-pair)
+    shift || true
+    relay_pair_command "$@"
+    ;;
+  uninstall)
+    shift || true
+    uninstall_command "$@"
+    ;;
+  wake)
+    shift || true
+    wake_command "$@"
+    ;;
+  doctor)
+    doctor_command
+    ;;
+  version|-v|--version)
+    echo "dexrelay $VERSION"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+esac
