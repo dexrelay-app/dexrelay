@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.28}"
+VERSION="${VERSION:-0.1.29}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -82,7 +82,7 @@ Commands:
   status    Show bridge/helper, launch agent, Tailscale, and Codex health.
   pair      Print a short-lived QR pairing code for the iPhone onboarding flow.
   relay-pair Prepare the relay runtime automatically and print a relay bootstrap QR.
-  uninstall Remove the DexRelay runtime, launch agents, logs, and Homebrew CLI.
+  uninstall Remove the DexRelay runtime, launch agents, logs, and installed DexRelay CLI.
   wake      Control the keep-awake launch agent (on, off, status).
   doctor    Print the installed payload location and expected runtime paths.
   version   Print the DexRelay CLI wrapper version.
@@ -91,6 +91,11 @@ EOF
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+global_npm_has_dexrelay() {
+  command_exists npm || return 1
+  npm list -g dexrelay --depth=0 >/dev/null 2>&1
 }
 
 resolve_tailscale_cli() {
@@ -644,6 +649,7 @@ relay_pair_command() {
 uninstall_command() {
   local current_cli=""
   local should_uninstall_brew=0
+  local should_uninstall_npm=0
 
   printf 'DexRelay uninstall\n'
   printf '==================\n'
@@ -651,6 +657,9 @@ uninstall_command() {
   current_cli="$(command -v dexrelay 2>/dev/null || true)"
   if command_exists brew && brew list --formula dexrelay >/dev/null 2>&1; then
     should_uninstall_brew=1
+  fi
+  if global_npm_has_dexrelay; then
+    should_uninstall_npm=1
   fi
 
   printf 'Stopping launch agents.\n'
@@ -674,7 +683,14 @@ uninstall_command() {
     printf 'Removing Homebrew formula.\n'
     brew uninstall --formula dexrelay >/dev/null
   else
-    printf 'Homebrew formula not installed. Skipping CLI uninstall.\n'
+    printf 'Homebrew formula not installed.\n'
+  fi
+
+  if [[ $should_uninstall_npm -eq 1 ]]; then
+    printf 'Removing global npm package.\n'
+    npm uninstall -g dexrelay >/dev/null
+  else
+    printf 'Global npm package not installed.\n'
   fi
 
   printf 'DexRelay has been removed from this Mac.\n'

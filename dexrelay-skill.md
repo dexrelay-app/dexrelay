@@ -105,7 +105,7 @@ dexrelay install
 dexrelay uninstall
 ```
 
-This removes the DexRelay runtime, launch agents, logs, and the Homebrew CLI if it was installed through Homebrew.
+This removes the DexRelay runtime, launch agents, logs, and the installed DexRelay CLI, whether it came from Homebrew or `npm i -g dexrelay`.
 
 ## Keep-awake controls
 
