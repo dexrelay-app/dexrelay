@@ -18,7 +18,6 @@ from urllib.parse import urlencode, unquote, urlparse
 
 
 DEFAULT_RUNTIME_ROOT = os.path.expanduser("~/Library/Application Support/DexRelay/runtime")
-LEGACY_RUNTIME_ROOT = os.path.expanduser("~/src/CodexRelayBackendBootstrap")
 
 
 def runtime_root_ready(path: str) -> bool:
@@ -36,10 +35,6 @@ def resolve_install_root() -> str:
     explicit = os.environ.get("CODEX_RELAY_ROOT")
     if explicit:
         return os.path.expanduser(explicit)
-    if runtime_root_ready(DEFAULT_RUNTIME_ROOT):
-        return DEFAULT_RUNTIME_ROOT
-    if runtime_root_ready(LEGACY_RUNTIME_ROOT):
-        return LEGACY_RUNTIME_ROOT
     return DEFAULT_RUNTIME_ROOT
 
 
@@ -293,7 +288,6 @@ state = {
     "bridgePort": BRIDGE_PORT,
     "installRoot": INSTALL_ROOT,
     "defaultInstallRoot": DEFAULT_RUNTIME_ROOT,
-    "legacyInstallRoot": LEGACY_RUNTIME_ROOT,
     "otaPublicRoot": OTA_PUBLIC_ROOT,
     "projectsRoot": PROJECTS_ROOT,
     "adminProjectRoot": ADMIN_PROJECT_ROOT,

@@ -1,75 +1,133 @@
-# DexRelay
+# Bootstrap Payload
 
-DexRelay is the public Mac-side CLI/bootstrap runtime for the DexRelay iPhone app.
+This folder is the publishable DexRelay Mac payload.
 
-This repository contains only the MIT-licensed DexRelay CLI, install/runtime scripts,
-bridge/helper runtime files, setup guide assets, and related public bootstrap tooling.
-The iOS app remains proprietary and is not included here.
+It is the source of truth for:
 
-## Install
+- the public install script
+- the public `dexrelay` CLI wrapper
+- the public npm package
+- the helper
+- the bootstrap bridge runtime
+- the optional relay runtime pieces
+- the public setup guide and skill doc
 
-Recommended:
+## What this payload now represents
 
-```bash
-brew install dexrelay-app/dexrelay/dexrelay && dexrelay install
+The current DexRelay product model is:
+
+1. install DexRelay on the Mac
+2. run `dexrelay pair`
+3. scan the QR on the phone
+4. use local Wi-Fi first
+5. use Tailscale fallback when the device leaves Wi-Fi
+
+So this payload is no longer just “install a bridge on `:4615`”.
+
+It now owns:
+
+- QR pairing
+- helper health and setup state
+- direct LAN-first bootstrap
+- Tailscale fallback host bootstrap
+- relay runtime scaffolding
+- Mac-side self-heal behavior
+
+## Public Cloudflare layout
+
+```text
+https://assets.dexrelay.app/install.sh
+https://assets.dexrelay.app/bridge.js
+https://assets.dexrelay.app/relay-server.js
+https://assets.dexrelay.app/relay-connector.js
+https://assets.dexrelay.app/package.json
+https://assets.dexrelay.app/dexrelay
+https://assets.dexrelay.app/helper.py
+https://assets.dexrelay.app/create-mac-project.sh
+https://assets.dexrelay.app/git-project-automation.sh
+https://assets.dexrelay.app/governancectl.py
+https://assets.dexrelay.app/services.registry.json
+https://assets.dexrelay.app/servicectl.py
+https://assets.dexrelay.app/rebuild-workspace-services.py
+https://assets.dexrelay.app/migrate-dexrelay-state.py
+https://assets.dexrelay.app/setup-guide.html
+https://assets.dexrelay.app/dexrelay-skill.md
 ```
 
-NPM global:
+## Important runtime defaults
 
-```bash
-npm i -g dexrelay
-```
+- runtime root: `~/Library/Application Support/DexRelay/runtime`
+- admin workspace: `~/src/DexRelay Admin`
+- direct bridge port: `4615`
+- helper port: `4616`
+- relay server port: `4620`
 
-NPM one-shot:
+## Canonical user commands
 
-```bash
-npx dexrelay install
-```
+- `dexrelay install`
+- `dexrelay status`
+- `dexrelay repair`
+- `dexrelay pair`
+- `dexrelay uninstall`
+- `dexrelay wake on|off|status`
 
-Fallback:
+Advanced:
 
-```bash
-curl -fsSL https://assets.dexrelay.app/install.sh | bash
-```
+- `dexrelay relay-pair`
 
-## Runtime Defaults
+## User-facing happy path
 
-- Runtime root: `~/Library/Application Support/DexRelay/runtime`
-- Legacy runtime root: `~/src/CodexRelayBackendBootstrap`
-- Admin workspace: `~/src/DexRelay Admin`
-- Direct bridge port: `4615`
-- Helper port: `4616`
-- Relay server port: `4620`
+Normal user flow should be:
 
-## Key Commands
+1. run `npm i -g dexrelay`
+2. wait for DexRelay to bootstrap the Mac runtime automatically
+3. on the Mac, run `dexrelay pair`
+4. on the phone, scan the QR
+5. start coding
 
-```bash
-dexrelay install
-dexrelay repair
-dexrelay status
-dexrelay pair
-dexrelay relay-pair
-dexrelay uninstall
-dexrelay wake on
-dexrelay wake off
-dexrelay wake status
-```
+Secondary install path:
 
-## Repository Scope
+Tailscale is not supposed to be the first-run blocker for same-network onboarding anymore.
 
-Public in this repository:
+Instead:
+
+- same Wi-Fi should work immediately
+- Tailscale should keep DexRelay working away from Wi-Fi
+
+## Reliability expectations
+
+After install, the payload is expected to leave behind:
+
+- launchd-managed DexRelay services
+- helper
+- watchdog
+- keep-awake
+- relay runtime support where configured
+
+That means:
+
+- `dexrelay status` is the canonical health view
+- `dexrelay repair` is the canonical in-place fix
+- `dexrelay install` is safe to rerun as an update or reinstall path
+- `dexrelay install` should also migrate older project state from `.codex/` into `.dexrelay/`
+
+## Release rule
+
+If any thread changes:
 
 - `install.sh`
 - `dexrelay`
+- `helper.py`
 - `bridge.js`
 - `relay-server.js`
 - `relay-connector.js`
-- `helper.py`
-- runtime helper scripts under the repo root
-- setup guide assets
+- `rebuild-workspace-services.py`
+- `migrate-dexrelay-state.py`
+- public setup or skill docs
 
-Not included:
+then the payload, docs, Homebrew formula, and installable skills must be released together.
 
-- the proprietary DexRelay iOS app
-- private internal docs
-- private build/release credentials
+See:
+
+- [DEXRELAY_PUBLISHING.md](/Users/chetanankola/src/Codex%20iphone%20App/docs/DEXRELAY_PUBLISHING.md)
+- [DEXRELAY_ONBOARDING_RUNTIME.md](/Users/chetanankola/src/Codex%20iphone%20App/docs/DEXRELAY_ONBOARDING_RUNTIME.md)

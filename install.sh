@@ -2,7 +2,6 @@
 set -euo pipefail
 
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
-LEGACY_RUNTIME_ROOT="$HOME/src/CodexRelayBackendBootstrap"
 
 runtime_root_ready() {
   local root="$1"
@@ -12,10 +11,6 @@ runtime_root_ready() {
 resolve_runtime_root() {
   if [[ -n "${CODEX_RELAY_ROOT:-}" ]]; then
     printf '%s\n' "$CODEX_RELAY_ROOT"
-  elif runtime_root_ready "$DEFAULT_RUNTIME_ROOT"; then
-    printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
-  elif runtime_root_ready "$LEGACY_RUNTIME_ROOT"; then
-    printf '%s\n' "$LEGACY_RUNTIME_ROOT"
   else
     printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
   fi
@@ -331,14 +326,6 @@ ensure_codex() {
 
 write_bridge_package_json() {
   local package_path="$BRIDGE_DIR/package.json"
-  if [[ -f "$LOCAL_PACKAGE_SOURCE" ]]; then
-    cp "$LOCAL_PACKAGE_SOURCE" "$package_path"
-    return 0
-  fi
-  if curl -fsSL "$REMOTE_PACKAGE_SOURCE" -o "$package_path" 2>/dev/null; then
-    return 0
-  fi
-
   cat >"$package_path" <<'EOF'
 {
   "name": "codexrelay-bridge-runtime",
@@ -357,7 +344,7 @@ install_bridge_assets() {
   mkdir -p "$BRIDGE_DIR"
 
   if [[ -f "$LOCAL_BRIDGE_SOURCE" ]]; then
-    log "Copying bridge from local project checkout"
+    log "Copying bridge from bundled DexRelay payload"
     cp "$LOCAL_BRIDGE_SOURCE" "$BRIDGE_DIR/bridge.js"
   else
     log "Downloading bridge runtime from $REMOTE_BRIDGE_SOURCE"
@@ -378,14 +365,14 @@ install_bridge_assets() {
 
   write_bridge_package_json
   log "Installing bridge dependencies"
-  npm install --prefix "$BRIDGE_DIR" --omit=dev
+  DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$BRIDGE_DIR" --omit=dev
 }
 
 install_helper_assets() {
   mkdir -p "$HELPER_DIR"
 
   if [[ -f "$LOCAL_HELPER_SOURCE" ]]; then
-    log "Copying setup helper from local project checkout"
+    log "Copying setup helper from bundled DexRelay payload"
     cp "$LOCAL_HELPER_SOURCE" "$HELPER_DIR/helper.py"
   else
     log "Downloading setup helper from $REMOTE_HELPER_SOURCE"
@@ -534,11 +521,6 @@ import json, sys
 print(json.dumps(sys.argv[1]))
 PY
 ),
-  "legacyRuntimeRoot": $(python3 - <<'PY' "$LEGACY_RUNTIME_ROOT"
-import json, sys
-print(json.dumps(sys.argv[1]))
-PY
-),
   "projectsRoot": $(python3 - <<'PY' "$DEFAULT_PROJECTS_ROOT"
 import json, sys
 print(json.dumps(sys.argv[1]))
@@ -569,7 +551,6 @@ scaffold_admin_project() {
 set -euo pipefail
 
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
-LEGACY_RUNTIME_ROOT="$HOME/src/CodexRelayBackendBootstrap"
 
 runtime_root_ready() {
   local root="$1"
@@ -579,10 +560,6 @@ runtime_root_ready() {
 resolve_dexrelay_runtime_root() {
   if [[ -n "${CODEX_RELAY_ROOT:-}" ]]; then
     printf '%s\n' "$CODEX_RELAY_ROOT"
-  elif runtime_root_ready "$DEFAULT_RUNTIME_ROOT"; then
-    printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
-  elif runtime_root_ready "$LEGACY_RUNTIME_ROOT"; then
-    printf '%s\n' "$LEGACY_RUNTIME_ROOT"
   else
     printf '%s\n' "$DEFAULT_RUNTIME_ROOT"
   fi
@@ -805,11 +782,6 @@ PY
   "services": [],
   "runtime": {
     "installRoot": $(python3 - <<'PY' "$INSTALL_ROOT"
-import json, sys
-print(json.dumps(sys.argv[1]))
-PY
-),
-    "legacyInstallRoot": $(python3 - <<'PY' "$LEGACY_RUNTIME_ROOT"
 import json, sys
 print(json.dumps(sys.argv[1]))
 PY

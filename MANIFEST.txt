@@ -1,0 +1,37 @@
+Public bootstrap payload for Cloudflare:
+
+- install.sh
+- bridge.js
+- relay-server.js
+- relay-connector.js
+- package.json
+- dexrelay
+- helper.py
+- create-mac-project.sh
+- git-project-automation.sh
+- governancectl.py
+- services.registry.json
+- servicectl.py
+- rebuild-workspace-services.py
+- migrate-dexrelay-state.py
+- xcode-devdir.sh
+- run-ios-device.sh
+- run-ios-on-phone.sh
+- publish-ios-adhoc-ota.sh
+- prepare-ios-testflight.py
+- ios_testflight_common.py
+- codex-health-daemon.py
+- health-ui-index.html
+- health-ui-app.js
+- health-ui-styles.css
+- setup-guide.html
+- dexrelay-skill.md
+- og-dexrelay.png
+- og-dexrelay-2x.png
+
+Do not upload:
+
+- README.md
+- MANIFEST.txt
+- node_modules
+- package-lock.json

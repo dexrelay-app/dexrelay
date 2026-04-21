@@ -43,7 +43,7 @@ The DexRelay skill flow should handle the complete operator path:
 
 `dexrelay-setup` should be able to help with:
 
-- Homebrew install and `dexrelay install`
+- npm global install with automatic runtime bootstrap
 - helper, bridge, watchdog, and keep-awake verification
 - `dexrelay pair`
 - `dexrelay status`
@@ -69,7 +69,7 @@ When setup is already present but broken, the skill should help identify:
 ## Preferred install command
 
 ```bash
-brew tap dexrelay-app/dexrelay && brew install dexrelay && dexrelay install
+npm i -g dexrelay
 ```
 
 Fallback:
