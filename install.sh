@@ -52,6 +52,8 @@ HEALTH_PORT="${CODEX_HEALTH_PORT:-4610}"
 RELAY_SERVER_PORT="${CODEX_RELAY_SERVER_PORT:-4620}"
 RELAY_SERVER_PATH="${CODEX_RELAY_SERVER_PATH:-/relay}"
 RUNTIME_MANIFEST_PATH="$INSTALL_ROOT/runtime-manifest.json"
+INSTALL_MODE="${CODEX_RELAY_INSTALL_MODE:-direct-install-script}"
+AUTO_INSTALL="${CODEX_RELAY_AUTO_INSTALL:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_INSTALL_SCRIPT="$SCRIPT_DIR/install.sh"
@@ -103,6 +105,10 @@ REMOTE_HEALTH_UI_STYLES_SOURCE="$SETUP_BASE_URL/health-ui-styles.css"
 
 log() {
   printf "\n[%s] %s\n" "codex-relay-setup" "$1"
+}
+
+phase() {
+  log "Phase $1"
 }
 
 warn() {
@@ -506,11 +512,29 @@ migrate_project_state() {
 }
 
 write_runtime_manifest() {
+  local installed_at
   mkdir -p "$INSTALL_ROOT"
+  installed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
   cat >"$RUNTIME_MANIFEST_PATH" <<EOF
 {
   "version": 1,
+  "installMode": $(python3 - <<'PY' "$INSTALL_MODE"
+import json, sys
+print(json.dumps(sys.argv[1]))
+PY
+),
+  "autoInstall": $(python3 - <<'PY' "$AUTO_INSTALL"
+import json, sys
+value = sys.argv[1].strip().lower() in {"1", "true", "yes"}
+print("true" if value else "false")
+PY
+),
+  "installedAt": $(python3 - <<'PY' "$installed_at"
+import json, sys
+print(json.dumps(sys.argv[1]))
+PY
+),
   "runtimeRoot": $(python3 - <<'PY' "$INSTALL_ROOT"
 import json, sys
 print(json.dumps(sys.argv[1]))
@@ -1315,6 +1339,56 @@ start_helper_launch_agent() {
     || true
 }
 
+launch_agent_loaded() {
+  local label="$1"
+  local uid_num gui_domain user_domain
+  uid_num="$(id -u)"
+  gui_domain="gui/$uid_num"
+  user_domain="user/$uid_num"
+
+  launchctl print "$gui_domain/$label" >/dev/null 2>&1 \
+    || launchctl print "$user_domain/$label" >/dev/null 2>&1
+}
+
+port_listening() {
+  local port="$1"
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+helper_status_json() {
+  curl -fsS --max-time 3 "http://127.0.0.1:${HELPER_PORT}/api/helper/status" 2>/dev/null || true
+}
+
+helper_bridge_ready() {
+  local payload="$1"
+  [[ -n "$payload" ]] || return 1
+  printf '%s' "$payload" | grep -q '"bridgeReachable":[[:space:]]*true'
+}
+
+wait_for_runtime_ready() {
+  local attempts="${1:-20}"
+  local helper_json=""
+
+  while (( attempts > 0 )); do
+    helper_json="$(helper_status_json)"
+
+    if launch_agent_loaded "$BRIDGE_LABEL" \
+      && launch_agent_loaded "$HELPER_LABEL" \
+      && launch_agent_loaded "$RELAY_SERVER_LABEL" \
+      && port_listening "$BRIDGE_PORT" \
+      && port_listening "$HELPER_PORT" \
+      && port_listening "$RELAY_SERVER_PORT" \
+      && helper_bridge_ready "$helper_json"; then
+      return 0
+    fi
+
+    sleep 1
+    attempts=$((attempts - 1))
+  done
+
+  return 1
+}
+
 write_awake_launch_agent() {
   mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
 
@@ -1394,6 +1468,7 @@ show_next_steps() {
 }
 
 main() {
+  phase "1/4: checking prerequisites"
   require_macos
   ensure_homebrew
   load_brew_env
@@ -1404,6 +1479,8 @@ main() {
   ensure_formula python
   ensure_formula jq
   ensure_codex
+
+  phase "2/4: installing DexRelay runtime files"
   install_bridge_assets
   install_helper_assets
   install_runtime_scripts
@@ -1423,6 +1500,8 @@ main() {
   write_relay_connector_launch_agent
   write_watchdog_launch_agent
   write_awake_launch_agent
+
+  phase "3/4: starting background services"
   start_helper_launch_agent
   start_launch_agent "$HEALTHD_LABEL" "$HEALTHD_PLIST"
   start_launch_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"
@@ -1433,6 +1512,11 @@ main() {
     start_launch_agent "$AWAKE_LABEL" "$AWAKE_PLIST"
   else
     stop_launch_agent "$AWAKE_LABEL"
+  fi
+
+  phase "4/4: waiting for DexRelay to become ready"
+  if ! wait_for_runtime_ready 20; then
+    fail "DexRelay runtime did not become healthy after install. Run \`dexrelay status\` for details."
   fi
   show_next_steps
 }

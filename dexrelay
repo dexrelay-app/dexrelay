@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.29}"
+VERSION="${VERSION:-0.1.30}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -56,6 +56,7 @@ HELPER_STATE_DIR="${CODEX_RELAY_HELPER_STATE_DIR:-$HOME/Library/Application Supp
 BRIDGE_LOG_DIR="${CODEX_RELAY_BRIDGE_LOG_DIR:-$HOME/Library/Logs/CodexRelayBootstrap}"
 HELPER_LOG_DIR="${CODEX_RELAY_HELPER_LOG_DIR:-$HOME/Library/Logs/CodexRelayHelper}"
 RELAY_STATE_DIR="${CODEX_RELAY_RELAY_STATE_DIR:-$RUNTIME_ROOT/relay}"
+RUNTIME_MANIFEST_PATH="${CODEX_RELAY_RUNTIME_MANIFEST_PATH:-$RUNTIME_ROOT/runtime-manifest.json}"
 PROJECTS_ROOT="${CODEX_RELAY_PROJECTS_ROOT:-$HOME/src}"
 ADMIN_PROJECT_ROOT="${CODEX_RELAY_ADMIN_PROJECT_ROOT:-$PROJECTS_ROOT/DexRelay Admin}"
 
@@ -200,15 +201,91 @@ helper_status_json() {
   curl -fsS --max-time 3 "$HELPER_URL" 2>/dev/null || true
 }
 
-health_check_ok() {
+runtime_manifest_json() {
+  [[ -f "$RUNTIME_MANIFEST_PATH" ]] || return 0
+  cat "$RUNTIME_MANIFEST_PATH" 2>/dev/null || true
+}
+
+helper_bridge_ready() {
   local helper_json="$1"
   local bridge_reachable
 
   [[ -n "$helper_json" ]] || return 1
   bridge_reachable="$(json_field "$helper_json" "bridgeReachable" 2>/dev/null || true)"
-  [[ "$bridge_reachable" == "true" ]] || return 1
+  [[ "$bridge_reachable" == "true" ]]
+}
 
-  port_listening "$BRIDGE_PORT" && port_listening "$HELPER_PORT"
+health_check_ok() {
+  local helper_json="$1"
+
+  helper_bridge_ready "$helper_json" || return 1
+
+  port_listening "$BRIDGE_PORT" && port_listening "$HELPER_PORT" && port_listening "$RELAY_SERVER_PORT"
+}
+
+runtime_snapshot() {
+  bridge_agent="not loaded"
+  helper_agent="not loaded"
+  watchdog_agent="not loaded"
+  relay_server_agent="not loaded"
+  relay_connector_agent="not loaded"
+  keep_awake_state="disabled"
+  bridge_socket="closed"
+  helper_socket="closed"
+  relay_server_socket="closed"
+  helper_json=""
+  helper_version=""
+  helper_setup_state=""
+  helper_bridge_reachable=""
+  helper_dns=""
+  helper_ip=""
+  helper_ota_root=""
+
+  launch_agent_loaded "$BRIDGE_LABEL" && bridge_agent="loaded"
+  launch_agent_loaded "$HELPER_LABEL" && helper_agent="loaded"
+  launch_agent_loaded "$WATCHDOG_LABEL" && watchdog_agent="loaded"
+  launch_agent_loaded "$RELAY_SERVER_LABEL" && relay_server_agent="loaded"
+  launch_agent_loaded "$RELAY_CONNECTOR_LABEL" && relay_connector_agent="loaded"
+  keep_awake_enabled && keep_awake_state="loaded"
+  port_listening "$BRIDGE_PORT" && bridge_socket="listening"
+  port_listening "$HELPER_PORT" && helper_socket="listening"
+  port_listening "$RELAY_SERVER_PORT" && relay_server_socket="listening"
+
+  helper_json="$(helper_status_json)"
+  if [[ -n "$helper_json" ]]; then
+    helper_version="$(json_field "$helper_json" "helperVersion" 2>/dev/null || true)"
+    helper_setup_state="$(json_field "$helper_json" "setupState" 2>/dev/null || true)"
+    helper_bridge_reachable="$(json_field "$helper_json" "bridgeReachable" 2>/dev/null || true)"
+    helper_dns="$(json_field "$helper_json" "tailscaleDNSName" 2>/dev/null || true)"
+    helper_ip="$(json_field "$helper_json" "tailscaleIP" 2>/dev/null || true)"
+    helper_ota_root="$(json_field "$helper_json" "otaPublicRoot" 2>/dev/null || true)"
+  fi
+
+  helper_status="unreachable"
+  [[ -n "$helper_json" ]] && helper_status="reachable"
+}
+
+wait_for_runtime_snapshot() {
+  local attempts="${1:-8}"
+
+  while (( attempts > 0 )); do
+    runtime_snapshot
+
+    if [[ "$bridge_agent" == "loaded" \
+      && "$helper_agent" == "loaded" \
+      && "$relay_server_agent" == "loaded" \
+      && "$bridge_socket" == "listening" \
+      && "$helper_socket" == "listening" \
+      && "$relay_server_socket" == "listening" ]] \
+      && health_check_ok "$helper_json"; then
+      return 0
+    fi
+
+    attempts=$((attempts - 1))
+    (( attempts > 0 )) && sleep 1
+  done
+
+  return 1
 }
 
 print_status_line() {
@@ -340,14 +417,8 @@ status_command() {
   local tailscale_state="not connected"
   local tailscale_serve="unknown"
   local tailscale_identity=""
-  local helper_json=""
-  local helper_version=""
-  local helper_setup_state=""
-  local helper_bridge_reachable=""
-  local helper_dns=""
-  local helper_ip=""
-  local helper_ota_root=""
   local codex_state="missing"
+  local runtime_ready=1
   local bridge_agent="not loaded"
   local helper_agent="not loaded"
   local watchdog_agent="not loaded"
@@ -357,6 +428,18 @@ status_command() {
   local bridge_socket="closed"
   local helper_socket="closed"
   local relay_server_socket="closed"
+  local helper_status="unreachable"
+  local helper_json=""
+  local helper_version=""
+  local helper_setup_state=""
+  local helper_bridge_reachable=""
+  local helper_dns=""
+  local helper_ip=""
+  local helper_ota_root=""
+  local manifest_json=""
+  local install_mode=""
+  local auto_install=""
+  local installed_at=""
 
   if tailscale_cli="$(resolve_tailscale_cli 2>/dev/null)"; then
     tailscale_state="installed"
@@ -384,24 +467,14 @@ PY
   fi
 
   command_exists codex && codex_state="installed"
-  launch_agent_loaded "$BRIDGE_LABEL" && bridge_agent="loaded"
-  launch_agent_loaded "$HELPER_LABEL" && helper_agent="loaded"
-  launch_agent_loaded "$WATCHDOG_LABEL" && watchdog_agent="loaded"
-  launch_agent_loaded "$RELAY_SERVER_LABEL" && relay_server_agent="loaded"
-  launch_agent_loaded "$RELAY_CONNECTOR_LABEL" && relay_connector_agent="loaded"
-  keep_awake_enabled && keep_awake_state="loaded"
-  port_listening "$BRIDGE_PORT" && bridge_socket="listening"
-  port_listening "$HELPER_PORT" && helper_socket="listening"
-  port_listening "$RELAY_SERVER_PORT" && relay_server_socket="listening"
-
-  helper_json="$(helper_status_json)"
-  if [[ -n "$helper_json" ]]; then
-    helper_version="$(json_field "$helper_json" "helperVersion" 2>/dev/null || true)"
-    helper_setup_state="$(json_field "$helper_json" "setupState" 2>/dev/null || true)"
-    helper_bridge_reachable="$(json_field "$helper_json" "bridgeReachable" 2>/dev/null || true)"
-    helper_dns="$(json_field "$helper_json" "tailscaleDNSName" 2>/dev/null || true)"
-    helper_ip="$(json_field "$helper_json" "tailscaleIP" 2>/dev/null || true)"
-    helper_ota_root="$(json_field "$helper_json" "otaPublicRoot" 2>/dev/null || true)"
+  if ! wait_for_runtime_snapshot 8; then
+    runtime_ready=0
+  fi
+  manifest_json="$(runtime_manifest_json)"
+  if [[ -n "$manifest_json" ]]; then
+    install_mode="$(json_field "$manifest_json" "installMode" 2>/dev/null || true)"
+    auto_install="$(json_field "$manifest_json" "autoInstall" 2>/dev/null || true)"
+    installed_at="$(json_field "$manifest_json" "installedAt" 2>/dev/null || true)"
   fi
 
   printf 'DexRelay status\n'
@@ -425,6 +498,9 @@ PY
   print_status_line "tailscale" "$tailscale_state"
   print_status_line "tailscale serve" "$tailscale_serve"
   [[ -n "$tailscale_identity" ]] && print_status_line "tailscale host" "$tailscale_identity"
+  [[ -n "$install_mode" ]] && print_status_line "install mode" "$install_mode"
+  [[ -n "$auto_install" ]] && print_status_line "auto install" "$auto_install"
+  [[ -n "$installed_at" ]] && print_status_line "installed at" "$installed_at"
   print_status_line "codex cli" "$codex_state"
   if [[ -n "$helper_json" ]]; then
     print_status_line "helper status" "reachable"
@@ -438,7 +514,7 @@ PY
     print_status_line "helper status" "unreachable"
   fi
 
-  if health_check_ok "$helper_json"; then
+  if (( runtime_ready )) && health_check_ok "$helper_json"; then
     exit 0
   fi
 
@@ -502,6 +578,8 @@ repair_command() {
 
   printf 'Bridge still unhealthy. Running full reinstall/repair.\n'
   export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+  export CODEX_RELAY_INSTALL_MODE="cli-repair"
+  export CODEX_RELAY_AUTO_INSTALL=0
   exec /bin/bash "$INSTALL_SCRIPT"
 }
 
@@ -511,11 +589,15 @@ wake_command() {
     on)
       export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
       export CODEX_RELAY_KEEP_AWAKE=1
+      export CODEX_RELAY_INSTALL_MODE="cli-wake-on"
+      export CODEX_RELAY_AUTO_INSTALL=0
       exec /bin/bash "$INSTALL_SCRIPT"
       ;;
     off)
       export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
       export CODEX_RELAY_KEEP_AWAKE=0
+      export CODEX_RELAY_INSTALL_MODE="cli-wake-off"
+      export CODEX_RELAY_AUTO_INSTALL=0
       exec /bin/bash "$INSTALL_SCRIPT"
       ;;
     status)
@@ -535,6 +617,18 @@ wake_command() {
 }
 
 doctor_command() {
+  local manifest_json=""
+  local install_mode=""
+  local auto_install=""
+  local installed_at=""
+
+  manifest_json="$(runtime_manifest_json)"
+  if [[ -n "$manifest_json" ]]; then
+    install_mode="$(json_field "$manifest_json" "installMode" 2>/dev/null || true)"
+    auto_install="$(json_field "$manifest_json" "autoInstall" 2>/dev/null || true)"
+    installed_at="$(json_field "$manifest_json" "installedAt" 2>/dev/null || true)"
+  fi
+
   cat <<EOF
 DexRelay CLI wrapper
 - version: $VERSION
@@ -552,6 +646,10 @@ DexRelay CLI wrapper
 - relay server launch agent: $RELAY_SERVER_PLIST
 - relay connector launch agent: $RELAY_CONNECTOR_PLIST
 - keep-awake launch agent: $KEEP_AWAKE_PLIST
+- runtime manifest: $RUNTIME_MANIFEST_PATH
+- install mode: ${install_mode:-unknown}
+- auto install: ${auto_install:-unknown}
+- installed at: ${installed_at:-unknown}
 EOF
 }
 
@@ -705,6 +803,8 @@ case "$cmd" in
   install)
     shift || true
     export CODEX_RELAY_LOCAL_PAYLOAD_ROOT="$PAYLOAD_ROOT"
+    export CODEX_RELAY_INSTALL_MODE="cli-install"
+    export CODEX_RELAY_AUTO_INSTALL=0
     exec /bin/bash "$INSTALL_SCRIPT" "$@"
     ;;
   repair)
