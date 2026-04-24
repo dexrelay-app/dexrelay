@@ -110,6 +110,48 @@ def load_registry(path: Path = SERVICES_REGISTRY_PATH) -> dict[str, Any]:
     return data
 
 
+def codex_config_project_paths(config_path: Path) -> list[Path]:
+    if not config_path.exists():
+        return []
+    if tomllib is not None:
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            config_projects = config.get("projects", {})
+            if isinstance(config_projects, dict):
+                return [Path(raw_path) for raw_path in sorted(config_projects.keys(), key=str.lower)]
+        except Exception:
+            return []
+
+    # Python 3.9 has no tomllib. Codex config project keys are TOML strings
+    # under [projects], so parse only that narrow, stable shape.
+    paths: list[Path] = []
+    in_projects = False
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        table_match = re.match(r'^\[projects\."(.+)"\]$', line)
+        if table_match:
+            try:
+                paths.append(Path(json.loads(f'"{table_match.group(1)}"')))
+            except Exception:
+                paths.append(Path(table_match.group(1)))
+            in_projects = False
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_projects = line == "[projects]"
+            continue
+        if not in_projects or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if len(key) >= 2 and key[0] == '"' and key[-1] == '"':
+            try:
+                paths.append(Path(json.loads(key)))
+            except Exception:
+                continue
+    return sorted(paths, key=lambda path: str(path).lower())
+
+
 def discover_projects(base_dir: Path) -> list[dict[str, str]]:
     seen: set[str] = set()
     projects: list[dict[str, str]] = []
@@ -132,15 +174,8 @@ def discover_projects(base_dir: Path) -> list[dict[str, str]]:
             add_project(child)
 
     config_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
-    if tomllib is not None and config_path.exists():
-        try:
-            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-            config_projects = config.get("projects", {})
-            if isinstance(config_projects, dict):
-                for raw_path in sorted(config_projects.keys(), key=str.lower):
-                    add_project(Path(raw_path))
-        except Exception:
-            pass
+    for raw_path in codex_config_project_paths(config_path):
+        add_project(raw_path)
 
     projects.sort(key=lambda item: item["name"].lower())
     return projects
