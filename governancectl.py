@@ -111,12 +111,38 @@ def load_registry(path: Path = SERVICES_REGISTRY_PATH) -> dict[str, Any]:
 
 
 def discover_projects(base_dir: Path) -> list[dict[str, str]]:
-    if not base_dir.exists():
-        return []
+    seen: set[str] = set()
     projects: list[dict[str, str]] = []
-    for child in sorted(base_dir.iterdir(), key=lambda p: p.name.lower()):
-        if child.is_dir():
-            projects.append({"name": child.name, "path": str(child)})
+
+    def add_project(path: Path) -> None:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        normalized = str(resolved)
+        if normalized in seen or not resolved.is_dir():
+            return
+        seen.add(normalized)
+        projects.append({"name": resolved.name, "path": normalized})
+
+    if not base_dir.exists():
+        pass
+    else:
+        for child in sorted(base_dir.iterdir(), key=lambda p: p.name.lower()):
+            add_project(child)
+
+    config_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+    if tomllib is not None and config_path.exists():
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            config_projects = config.get("projects", {})
+            if isinstance(config_projects, dict):
+                for raw_path in sorted(config_projects.keys(), key=str.lower):
+                    add_project(Path(raw_path))
+        except Exception:
+            pass
+
+    projects.sort(key=lambda item: item["name"].lower())
     return projects
 
 
@@ -297,6 +323,41 @@ def existing_governance_description(project_path: Path) -> str | None:
     if not description or is_placeholder_description(description):
         return None
     return clipped_line(description)
+
+
+def existing_governance_services(project_path: Path) -> list[dict[str, Any]]:
+    governance_path = project_path / PROJECT_GOVERNANCE_RELATIVE_PATH
+    if not governance_path.exists():
+        return []
+    try:
+        payload = load_json(governance_path)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    services = payload.get("services")
+    if not isinstance(services, list):
+        return []
+    return [service for service in services if isinstance(service, dict)]
+
+
+def service_identity(service: dict[str, Any]) -> str:
+    raw_id = str(service.get("serviceId") or service.get("id") or "").strip()
+    if raw_id:
+        return raw_id
+    name = str(service.get("name") or "").strip()
+    ports = service.get("ports") if isinstance(service.get("ports"), list) else []
+    return f"{name}:{','.join(str(port) for port in ports)}"
+
+
+def merge_project_services(existing: list[dict[str, Any]], discovered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for service in existing + discovered:
+        key = service_identity(service)
+        if not key:
+            continue
+        merged[key] = service
+    return list(merged.values())
 
 
 def normalize_service(service: dict[str, Any]) -> dict[str, Any]:
@@ -511,6 +572,7 @@ def ensure_project_files(project_name: str, project_path: Path, service_rows: li
     runbook_path = project_path / PROJECT_RUNBOOK_RELATIVE_PATH
     governance_path = project_path / PROJECT_GOVERNANCE_RELATIVE_PATH
     project_type = detect_project_type(project_path)
+    service_rows = merge_project_services(existing_governance_services(project_path), service_rows)
 
     runbook_exists = runbook_path.exists()
     governance_exists = governance_path.exists()

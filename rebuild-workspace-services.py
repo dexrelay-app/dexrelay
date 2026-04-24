@@ -11,6 +11,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 SERVICECTL_PATH = SCRIPT_DIR / "servicectl.py"
@@ -149,19 +154,39 @@ def merge_service_rows(service_rows: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def discover_projects(base_dir: Path) -> list[Path]:
-    if not base_dir.exists():
-        return []
     discovered: list[Path] = []
-    for child in base_dir.iterdir():
-        if not child.is_dir():
-            continue
-        name = child.name
+
+    def add_project(path: Path) -> None:
+        if not path.is_dir():
+            return
+        try:
+            candidate = path.expanduser().resolve()
+        except OSError:
+            candidate = path.expanduser()
+        name = candidate.name
         lowered = name.lower()
         if any(lowered.startswith(prefix) for prefix in IGNORED_PROJECT_PATTERNS):
-            continue
+            return
         if any(token in lowered for token in IGNORED_PROJECT_SUBSTRINGS):
-            continue
-        discovered.append(child)
+            return
+        if candidate not in discovered:
+            discovered.append(candidate)
+
+    if base_dir.exists():
+        for child in base_dir.iterdir():
+            add_project(child)
+
+    config_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+    if tomllib is not None and config_path.exists():
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            config_projects = config.get("projects", {})
+            if isinstance(config_projects, dict):
+                for raw_path in config_projects.keys():
+                    add_project(Path(raw_path))
+        except Exception:
+            pass
+
     return sorted(discovered, key=lambda path: path.name.lower())
 
 
@@ -204,7 +229,9 @@ def load_project_governance_services(base_dir: Path) -> list[dict[str, Any]]:
             continue
         for raw in payload.get("services", []):
             if isinstance(raw, dict):
-                rows.append(normalize_registry_service(raw))
+                service = dict(raw)
+                service.setdefault("projectPath", str(project_path))
+                rows.append(normalize_registry_service(service))
     return rows
 
 
