@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.35}"
+VERSION="${VERSION:-0.1.36}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -355,6 +355,10 @@ relay_bootstrap_request_json() {
 render_pairing_qr() {
   local pairing_uri="$1"
   local runtime_module="$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+
+  if [[ ! -d "$runtime_module" && -f "$RUNTIME_ROOT/bridge/package.json" ]] && command_exists npm; then
+    DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$RUNTIME_ROOT/bridge" --omit=dev >/dev/null 2>&1 || true
+  fi
 
   if command_exists node && [[ -d "$runtime_module" ]]; then
     PAIRING_URI="$pairing_uri" node - "$runtime_module" <<'EOF' 2>/dev/null && return 0

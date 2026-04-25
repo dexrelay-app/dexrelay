@@ -753,6 +753,10 @@ function runClaudeSend(params = {}) {
       resolve(payload);
     };
 
+    if (params.waitForCompletion === false) {
+      finish(claudeJobResult(job));
+    }
+
     const timer = setTimeout(() => {
       hardTimedOut = true;
       stderr += `\nTimed out after ${timeoutMs}ms`;
@@ -828,8 +832,9 @@ function runClaudeSend(params = {}) {
       }
       const parsed = parseClaudeJsonLine(stdout.trim().split('\n').filter(Boolean).pop() || stdout.trim());
       const exitCode = inactivityTimedOut || hardTimedOut ? -1 : (Number.isInteger(code) ? code : -1);
+      const extractedText = resultText || extractClaudeText(parsed, stdout);
       job.status = exitCode === 0 ? 'completed' : 'failed';
-      job.text = resultText || extractClaudeText(parsed, stdout);
+      job.text = exitCode === 0 ? extractedText : (resultText || '');
       job.sessionId = streamSessionId || extractClaudeSessionID(parsed, stdout);
       job.stdout = stdout;
       job.stderr = stderr;
