@@ -1,4 +1,4 @@
-const { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('fs');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const os = require('os');
@@ -10,6 +10,9 @@ const LISTEN_PORT = Number(process.env.BRIDGE_PORT || 4600);
 const UPSTREAM_TRANSPORT = (process.env.UPSTREAM_TRANSPORT || 'stdio').toLowerCase();
 const UPSTREAM_URL = process.env.UPSTREAM_URL || 'ws://127.0.0.1:4500';
 const CODEX_BIN = process.env.CODEX_BIN || '/opt/homebrew/bin/codex';
+const CLAUDE_BIN = process.env.CLAUDE_BIN
+  || (existsSync(path.join(os.homedir(), '.local/bin/claude')) ? path.join(os.homedir(), '.local/bin/claude') : null)
+  || (existsSync('/opt/homebrew/bin/claude') ? '/opt/homebrew/bin/claude' : 'claude');
 const CODEX_UPSTREAM_CWD = process.env.CODEX_UPSTREAM_CWD || process.cwd();
 const HISTORY_MAX_ITEMS = Number(process.env.HISTORY_MAX_ITEMS || 12);
 const ITEM_TEXT_MAX_CHARS = Number(process.env.ITEM_TEXT_MAX_CHARS || 4000);
@@ -388,6 +391,229 @@ function readSessionHistoryPage(params = {}) {
   };
 }
 
+function claudeProjectKeyForPath(cwd) {
+  const resolved = path.resolve(typeof cwd === 'string' && cwd.trim() ? cwd.trim() : process.cwd());
+  return resolved.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function parseClaudeJsonLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractClaudeText(parsed, stdout) {
+  if (!parsed || typeof parsed !== 'object') {
+    return stdout.trim();
+  }
+  if (typeof parsed.result === 'string') return parsed.result.trim();
+  if (typeof parsed.text === 'string') return parsed.text.trim();
+  if (typeof parsed.message === 'string') return parsed.message.trim();
+  if (Array.isArray(parsed.content)) {
+    return parsed.content
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return stdout.trim();
+}
+
+function extractClaudeSessionID(parsed, stdout) {
+  if (parsed && typeof parsed === 'object') {
+    const direct = parsed.session_id || parsed.sessionId || parsed.sessionID;
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+  }
+  const match = stdout.match(/"session[_Iid]*"\s*:\s*"([^"]+)"/);
+  return match?.[1] || null;
+}
+
+function runClaudeStatus() {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    const child = spawn(CLAUDE_BIN, ['--version'], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', (error) => {
+      resolve({ result: { installed: false, version: null, error: error.message } });
+    });
+    child.on('close', (code) => {
+      const version = (stdout || stderr).trim();
+      resolve({
+        result: {
+          installed: code === 0,
+          version: version || null,
+          claudeBin: CLAUDE_BIN,
+        },
+      });
+    });
+  });
+}
+
+function runClaudeModels() {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    const child = spawn(CLAUDE_BIN, ['--help'], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', (error) => {
+      resolve({ result: { models: [], supportsModelFlag: false, claudeBin: CLAUDE_BIN, error: error.message } });
+    });
+    child.on('close', (code) => {
+      const helpText = `${stdout}\n${stderr}`;
+      const supportsModelFlag = code === 0 && /--model\s+<model>/.test(helpText);
+      resolve({
+        result: {
+          supportsModelFlag,
+          claudeBin: CLAUDE_BIN,
+          models: supportsModelFlag
+            ? [
+                { id: 'sonnet', displayName: 'Sonnet', model: 'sonnet' },
+                { id: 'opus', displayName: 'Opus', model: 'opus' },
+              ]
+            : [],
+        },
+      });
+    });
+  });
+}
+
+function listClaudeSessions(params = {}) {
+  const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
+  const projectDir = path.join(os.homedir(), '.claude', 'projects', claudeProjectKeyForPath(cwd));
+  if (!existsSync(projectDir)) {
+    return { result: { sessions: [], projectDir } };
+  }
+
+  let entries = [];
+  try {
+    entries = readdirSync(projectDir)
+      .filter((name) => name.endsWith('.jsonl'))
+      .map((name) => {
+        const filePath = path.join(projectDir, name);
+        const stats = statSync(filePath);
+        return {
+          sessionId: name.replace(/\.jsonl$/, ''),
+          sessionPath: filePath,
+          updatedAt: stats.mtimeMs,
+          size: stats.size,
+        };
+      })
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, 20);
+  } catch (error) {
+    return { error: { code: -32603, message: `Could not list Claude sessions: ${error.message}` } };
+  }
+
+  return { result: { sessions: entries, projectDir } };
+}
+
+function runClaudeSend(params = {}) {
+  return new Promise((resolve) => {
+    const prompt = typeof params.prompt === 'string' ? params.prompt : '';
+    const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
+    const sessionId = typeof params.sessionId === 'string' && params.sessionId.trim() ? params.sessionId.trim() : null;
+    const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 600000;
+    const permissionMode = typeof params.permissionMode === 'string' && params.permissionMode.trim()
+      ? params.permissionMode.trim()
+      : 'default';
+    const model = typeof params.model === 'string' && params.model.trim() ? params.model.trim() : null;
+
+    if (!prompt.trim()) {
+      resolve({ error: { code: -32602, message: 'local/claude/send requires params.prompt' } });
+      return;
+    }
+
+    const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', permissionMode];
+    if (sessionId) {
+      args.push('--resume', sessionId);
+    }
+    if (model) {
+      args.push('--model', model);
+    }
+    if (params.dangerouslySkipPermissions === true) {
+      args.push('--dangerously-skip-permissions');
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const child = spawn(CLAUDE_BIN, args, {
+      cwd,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      resolve(payload);
+    };
+
+    const timer = setTimeout(() => {
+      stderr += `\nTimed out after ${timeoutMs}ms`;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 2000).unref();
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > LOCAL_EXEC_OUTPUT_LIMIT * 2) {
+        stdout = stdout.slice(-LOCAL_EXEC_OUTPUT_LIMIT * 2);
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > LOCAL_EXEC_OUTPUT_LIMIT * 2) {
+        stderr = stderr.slice(-LOCAL_EXEC_OUTPUT_LIMIT * 2);
+      }
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      finish({
+        result: {
+          text: '',
+          stdout: trimCommandOutput(stdout),
+          stderr: trimCommandOutput(`${stderr}\n${error.message}`.trim()),
+          exitCode: -1,
+          claudeBin: CLAUDE_BIN,
+        },
+      });
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (signal && code == null) {
+        stderr = `${stderr}\nTerminated by signal ${signal}`.trim();
+      }
+      const parsed = parseClaudeJsonLine(stdout.trim().split('\n').filter(Boolean).pop() || stdout.trim());
+      finish({
+        result: {
+          text: extractClaudeText(parsed, stdout),
+          sessionId: extractClaudeSessionID(parsed, stdout),
+          stdout: trimCommandOutput(stdout),
+          stderr: trimCommandOutput(stderr),
+          exitCode: Number.isInteger(code) ? code : -1,
+          claudeBin: CLAUDE_BIN,
+        },
+      });
+    });
+  });
+}
+
 function runLocalExec(params = {}) {
   return new Promise((resolve) => {
     const command = Array.isArray(params.command) ? params.command : null;
@@ -476,6 +702,10 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
     'local/readSessionHistoryPage',
     'local/listLiveSessions',
     'local/attachLiveSession',
+    'local/claude/status',
+    'local/claude/models',
+    'local/claude/listSessions',
+    'local/claude/send',
   ].includes(incoming.method)) {
     return false;
   }
@@ -497,6 +727,14 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
               ? await (typeof localContext.attachLiveSession === 'function'
                 ? localContext.attachLiveSession(incoming.params || {})
                 : { error: { code: -32603, message: 'Live session attach is unavailable' } })
+              : incoming.method === 'local/claude/status'
+                ? await runClaudeStatus()
+                : incoming.method === 'local/claude/models'
+                  ? await runClaudeModels()
+                  : incoming.method === 'local/claude/listSessions'
+                    ? listClaudeSessions(incoming.params || {})
+                    : incoming.method === 'local/claude/send'
+                      ? await runClaudeSend(incoming.params || {})
         : await runLocalExec(incoming.params);
   if (client.readyState === WebSocket.OPEN) {
     const payload = {
@@ -505,7 +743,16 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
       ...(response.error ? { error: response.error } : { result: response.result }),
     };
     client.send(
-      ['local/readFile', 'local/readSessionHistoryPage', 'local/listLiveSessions', 'local/attachLiveSession'].includes(incoming.method)
+      [
+        'local/readFile',
+        'local/readSessionHistoryPage',
+        'local/listLiveSessions',
+        'local/attachLiveSession',
+        'local/claude/status',
+        'local/claude/models',
+        'local/claude/listSessions',
+        'local/claude/send',
+      ].includes(incoming.method)
         ? JSON.stringify(payload)
         : serializeForMobile(payload),
       { binary: false }

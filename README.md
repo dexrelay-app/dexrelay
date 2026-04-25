@@ -125,7 +125,9 @@ If any thread changes:
 - `migrate-dexrelay-state.py`
 - public setup or skill docs
 
-then the payload, docs, Homebrew formula, and installable skills must be released together.
+then the payload, docs, and installable skills must be released together.
+
+The repo-owned Homebrew tap mirror is optional legacy infrastructure. It can be updated separately if needed, but it should not gate the standard DexRelay release.
 
 See:
 
