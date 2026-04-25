@@ -528,6 +528,9 @@ function runClaudeSend(params = {}) {
     const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
     const sessionId = typeof params.sessionId === 'string' && params.sessionId.trim() ? params.sessionId.trim() : null;
     const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 600000;
+    const inactivityTimeoutMs = Number.isFinite(params.inactivityTimeoutMs)
+      ? Number(params.inactivityTimeoutMs)
+      : 180000;
     const permissionMode = typeof params.permissionMode === 'string' && params.permissionMode.trim()
       ? params.permissionMode.trim()
       : 'default';
@@ -538,7 +541,16 @@ function runClaudeSend(params = {}) {
       return;
     }
 
-    const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', permissionMode];
+    const args = [
+      '-p',
+      prompt,
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      '--permission-mode',
+      permissionMode,
+    ];
     if (sessionId) {
       args.push('--resume', sessionId);
     }
@@ -552,6 +564,11 @@ function runClaudeSend(params = {}) {
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let stdoutRemainder = '';
+    let resultText = '';
+    let streamSessionId = null;
+    let lastProgressAt = Date.now();
+    let inactivityTimedOut = false;
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env: process.env,
@@ -570,13 +587,42 @@ function runClaudeSend(params = {}) {
       setTimeout(() => child.kill('SIGKILL'), 2000).unref();
     }, timeoutMs);
 
+    const inactivityTimer = setInterval(() => {
+      if (Date.now() - lastProgressAt < inactivityTimeoutMs) return;
+      inactivityTimedOut = true;
+      stderr += `\nNo Claude output for ${inactivityTimeoutMs}ms`;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 2000).unref();
+    }, 5000);
+
+    const handleClaudeStreamLine = (line) => {
+      const parsed = parseClaudeJsonLine(line);
+      if (!parsed || typeof parsed !== 'object') return;
+      const directSessionId = parsed.session_id || parsed.sessionId || parsed.sessionID;
+      if (typeof directSessionId === 'string' && directSessionId.trim()) {
+        streamSessionId = directSessionId.trim();
+      }
+      if (parsed.type === 'result' && typeof parsed.result === 'string') {
+        resultText = parsed.result.trim();
+      }
+    };
+
     child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      lastProgressAt = Date.now();
+      stdout += text;
       if (stdout.length > LOCAL_EXEC_OUTPUT_LIMIT * 2) {
         stdout = stdout.slice(-LOCAL_EXEC_OUTPUT_LIMIT * 2);
       }
+      stdoutRemainder += text;
+      const lines = stdoutRemainder.split(/\r?\n/);
+      stdoutRemainder = lines.pop() || '';
+      for (const line of lines) {
+        if (line.trim()) handleClaudeStreamLine(line.trim());
+      }
     });
     child.stderr.on('data', (chunk) => {
+      lastProgressAt = Date.now();
       stderr += chunk.toString();
       if (stderr.length > LOCAL_EXEC_OUTPUT_LIMIT * 2) {
         stderr = stderr.slice(-LOCAL_EXEC_OUTPUT_LIMIT * 2);
@@ -584,6 +630,7 @@ function runClaudeSend(params = {}) {
     });
     child.on('error', (error) => {
       clearTimeout(timer);
+      clearInterval(inactivityTimer);
       finish({
         result: {
           text: '',
@@ -596,17 +643,21 @@ function runClaudeSend(params = {}) {
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
+      clearInterval(inactivityTimer);
+      if (stdoutRemainder.trim()) {
+        handleClaudeStreamLine(stdoutRemainder.trim());
+      }
       if (signal && code == null) {
         stderr = `${stderr}\nTerminated by signal ${signal}`.trim();
       }
       const parsed = parseClaudeJsonLine(stdout.trim().split('\n').filter(Boolean).pop() || stdout.trim());
       finish({
         result: {
-          text: extractClaudeText(parsed, stdout),
-          sessionId: extractClaudeSessionID(parsed, stdout),
+          text: resultText || extractClaudeText(parsed, stdout),
+          sessionId: streamSessionId || extractClaudeSessionID(parsed, stdout),
           stdout: trimCommandOutput(stdout),
           stderr: trimCommandOutput(stderr),
-          exitCode: Number.isInteger(code) ? code : -1,
+          exitCode: inactivityTimedOut ? -1 : (Number.isInteger(code) ? code : -1),
           claudeBin: CLAUDE_BIN,
         },
       });
