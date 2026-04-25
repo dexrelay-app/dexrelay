@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.36}"
+VERSION="${VERSION:-0.1.37}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -352,12 +352,54 @@ relay_bootstrap_request_json() {
     "http://127.0.0.1:${HELPER_PORT}/api/helper/relay-bootstrap/request" 2>/dev/null || true
 }
 
+bridge_package_json_path() {
+  printf '%s\n' "$RUNTIME_ROOT/bridge/package.json"
+}
+
+bridge_qr_module_path() {
+  printf '%s\n' "$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+}
+
+bridge_qr_renderer_ready() {
+  command_exists node && [[ -d "$(bridge_qr_module_path)" ]]
+}
+
+bridge_qr_renderer_status() {
+  if bridge_qr_renderer_ready; then
+    printf 'ready\n'
+    return 0
+  fi
+
+  if ! command_exists node; then
+    printf 'missing node\n'
+  elif [[ ! -f "$(bridge_package_json_path)" ]]; then
+    printf 'missing bridge package.json\n'
+  elif ! command_exists npm; then
+    printf 'missing npm\n'
+  else
+    printf 'missing qrcode-terminal\n'
+  fi
+
+  return 1
+}
+
+ensure_bridge_dependencies() {
+  local package_json
+  package_json="$(bridge_package_json_path)"
+
+  [[ -f "$package_json" ]] || return 1
+  command_exists npm || return 1
+
+  DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$RUNTIME_ROOT/bridge" --omit=dev >/dev/null 2>&1
+}
+
 render_pairing_qr() {
   local pairing_uri="$1"
-  local runtime_module="$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+  local runtime_module
+  runtime_module="$(bridge_qr_module_path)"
 
-  if [[ ! -d "$runtime_module" && -f "$RUNTIME_ROOT/bridge/package.json" ]] && command_exists npm; then
-    DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$RUNTIME_ROOT/bridge" --omit=dev >/dev/null 2>&1 || true
+  if [[ ! -d "$runtime_module" ]]; then
+    ensure_bridge_dependencies || true
   fi
 
   if command_exists node && [[ -d "$runtime_module" ]]; then
@@ -369,6 +411,7 @@ EOF
   fi
 
   printf '\nQR renderer unavailable. Use the pairing URI below instead.\n'
+  printf 'To repair QR output, run `dexrelay repair`, then `dexrelay pair` again.\n'
   return 1
 }
 
@@ -444,6 +487,8 @@ status_command() {
   local install_mode=""
   local auto_install=""
   local installed_at=""
+  local qr_renderer_state=""
+  local qr_renderer_ready=1
 
   if tailscale_cli="$(resolve_tailscale_cli 2>/dev/null)"; then
     tailscale_state="installed"
@@ -473,6 +518,11 @@ PY
   command_exists codex && codex_state="installed"
   if ! wait_for_runtime_snapshot 8; then
     runtime_ready=0
+  fi
+  if qr_renderer_state="$(bridge_qr_renderer_status)"; then
+    qr_renderer_ready=1
+  else
+    qr_renderer_ready=0
   fi
   manifest_json="$(runtime_manifest_json)"
   if [[ -n "$manifest_json" ]]; then
@@ -506,6 +556,7 @@ PY
   [[ -n "$auto_install" ]] && print_status_line "auto install" "$auto_install"
   [[ -n "$installed_at" ]] && print_status_line "installed at" "$installed_at"
   print_status_line "codex cli" "$codex_state"
+  print_status_line "pair qr renderer" "$qr_renderer_state"
   if [[ -n "$helper_json" ]]; then
     print_status_line "helper status" "reachable"
     [[ -n "$helper_version" ]] && print_status_line "helper version" "$helper_version"
@@ -518,7 +569,7 @@ PY
     print_status_line "helper status" "unreachable"
   fi
 
-  if (( runtime_ready )) && health_check_ok "$helper_json"; then
+  if (( runtime_ready )) && (( qr_renderer_ready )) && health_check_ok "$helper_json"; then
     exit 0
   fi
 
@@ -531,6 +582,12 @@ repair_command() {
 
   printf 'DexRelay repair\n'
   printf '===============\n'
+
+  if ensure_bridge_dependencies; then
+    printf 'Verified bridge npm dependencies\n'
+  else
+    printf 'Could not verify bridge npm dependencies. Continuing runtime repair.\n'
+  fi
 
   if tailscale_cli="$(resolve_tailscale_cli 2>/dev/null)"; then
     if ! "$tailscale_cli" status --json >/dev/null 2>&1; then
