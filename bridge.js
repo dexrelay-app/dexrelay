@@ -26,7 +26,11 @@ const DETACHED_IDLE_SHUTDOWN_MS = Number(process.env.DETACHED_IDLE_SHUTDOWN_MS |
 const LIVE_SESSION_REPLAY_LIMIT = Number(process.env.LIVE_SESSION_REPLAY_LIMIT || 160);
 const RECENT_TURN_REQUEST_GRACE_MS = Number(process.env.RECENT_TURN_REQUEST_GRACE_MS || 30 * 1000);
 const RECENT_SESSION_ACTIVITY_GRACE_MS = Number(process.env.RECENT_SESSION_ACTIVITY_GRACE_MS || 90 * 1000);
+const CLAUDE_JOB_DIR = process.env.CLAUDE_JOB_DIR
+  || path.join(os.homedir(), 'Library/Application Support/DexRelay/runtime/claude-jobs');
 const sessionHistoryCache = new Map();
+const activeClaudeJobIDs = new Set();
+const claudeJobWaiters = new Map();
 
 const server = new WebSocket.Server({ host: LISTEN_HOST, port: LISTEN_PORT, perMessageDeflate: false });
 
@@ -522,11 +526,135 @@ function listClaudeSessions(params = {}) {
   return { result: { sessions: entries, projectDir } };
 }
 
+function sanitizeClaudeJobID(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return null;
+  return raw.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 120) || null;
+}
+
+function createClaudeJobID() {
+  return `claude-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function claudeJobPath(jobID) {
+  return path.join(CLAUDE_JOB_DIR, `${sanitizeFileName(jobID)}.json`);
+}
+
+function readClaudeJob(jobID) {
+  const sanitized = sanitizeClaudeJobID(jobID);
+  if (!sanitized) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(claudeJobPath(sanitized), 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeClaudeJob(job) {
+  if (!job || typeof job !== 'object' || !sanitizeClaudeJobID(job.jobId)) return;
+  mkdirSync(CLAUDE_JOB_DIR, { recursive: true });
+  const normalized = {
+    ...job,
+    updatedAt: Date.now(),
+  };
+  writeFileSync(claudeJobPath(normalized.jobId), JSON.stringify(normalized, null, 2));
+}
+
+function mobileClaudeJob(job) {
+  if (!job || typeof job !== 'object') return null;
+  return {
+    jobId: job.jobId || null,
+    threadId: job.threadId || null,
+    status: job.status || 'unknown',
+    cwd: job.cwd || null,
+    model: job.model || null,
+    sessionId: job.sessionId || null,
+    startedAt: job.startedAt || null,
+    updatedAt: job.updatedAt || null,
+    completedAt: job.completedAt || null,
+    exitCode: Number.isInteger(job.exitCode) ? job.exitCode : null,
+    text: typeof job.text === 'string' ? job.text : '',
+    stdout: trimCommandOutput(job.stdout || ''),
+    stderr: trimCommandOutput(job.stderr || ''),
+    error: typeof job.error === 'string' ? job.error : '',
+  };
+}
+
+function claudeJobResult(job) {
+  const mobileJob = mobileClaudeJob(job);
+  return {
+    result: {
+      ...(mobileJob || {}),
+      job: mobileJob,
+      text: mobileJob?.text || mobileJob?.stdout || mobileJob?.stderr || '',
+      sessionId: mobileJob?.sessionId || null,
+      stdout: mobileJob?.stdout || '',
+      stderr: mobileJob?.stderr || '',
+      exitCode: Number.isInteger(mobileJob?.exitCode) ? mobileJob.exitCode : -1,
+      claudeBin: CLAUDE_BIN,
+    },
+  };
+}
+
+function resolveClaudeJobWaiters(job) {
+  const waiters = claudeJobWaiters.get(job.jobId) || [];
+  claudeJobWaiters.delete(job.jobId);
+  for (const waiter of waiters) {
+    waiter(claudeJobResult(job));
+  }
+}
+
+function waitForClaudeJob(jobID) {
+  return new Promise((resolve) => {
+    const waiters = claudeJobWaiters.get(jobID) || [];
+    waiters.push(resolve);
+    claudeJobWaiters.set(jobID, waiters);
+  });
+}
+
+function latestClaudeJobForThread(threadID) {
+  const normalizedThreadID = typeof threadID === 'string' ? threadID.trim() : '';
+  if (!normalizedThreadID || !existsSync(CLAUDE_JOB_DIR)) return null;
+
+  let best = null;
+  try {
+    for (const name of readdirSync(CLAUDE_JOB_DIR)) {
+      if (!name.endsWith('.json')) continue;
+      const parsed = JSON.parse(readFileSync(path.join(CLAUDE_JOB_DIR, name), 'utf8'));
+      if (!parsed || parsed.threadId !== normalizedThreadID) continue;
+      if (!best || (parsed.updatedAt || 0) > (best.updatedAt || 0)) {
+        best = parsed;
+      }
+    }
+  } catch (_) {}
+  return best;
+}
+
+function claudeJobStatus(params = {}) {
+  const jobID = sanitizeClaudeJobID(params.jobId);
+  const threadID = typeof params.threadId === 'string' ? params.threadId.trim() : '';
+  const job = jobID ? readClaudeJob(jobID) : latestClaudeJobForThread(threadID);
+  if (!job) {
+    return { result: { found: false, jobId: jobID || null, threadId: threadID || null } };
+  }
+  return {
+    result: {
+      found: true,
+      active: activeClaudeJobIDs.has(job.jobId),
+      job: mobileClaudeJob(job),
+    },
+  };
+}
+
 function runClaudeSend(params = {}) {
   return new Promise((resolve) => {
     const prompt = typeof params.prompt === 'string' ? params.prompt : '';
     const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
     const sessionId = typeof params.sessionId === 'string' && params.sessionId.trim() ? params.sessionId.trim() : null;
+    const threadId = typeof params.threadId === 'string' && params.threadId.trim() ? params.threadId.trim() : null;
+    const requestedJobID = sanitizeClaudeJobID(params.jobId);
+    const jobId = requestedJobID || createClaudeJobID();
     const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 600000;
     const inactivityTimeoutMs = Number.isFinite(params.inactivityTimeoutMs)
       ? Number(params.inactivityTimeoutMs)
@@ -538,6 +666,26 @@ function runClaudeSend(params = {}) {
 
     if (!prompt.trim()) {
       resolve({ error: { code: -32602, message: 'local/claude/send requires params.prompt' } });
+      return;
+    }
+
+    const existingJob = readClaudeJob(jobId);
+    if (existingJob) {
+      if (['completed', 'failed'].includes(existingJob.status)) {
+        resolve(claudeJobResult(existingJob));
+        return;
+      }
+      if (activeClaudeJobIDs.has(jobId)) {
+        waitForClaudeJob(jobId).then(resolve);
+        return;
+      }
+      existingJob.status = 'failed';
+      existingJob.error = 'Claude job was interrupted before completion.';
+      existingJob.stderr = `${existingJob.stderr || ''}\nClaude job was interrupted before completion.`.trim();
+      existingJob.exitCode = -1;
+      existingJob.completedAt = Date.now();
+      writeClaudeJob(existingJob);
+      resolve(claudeJobResult(existingJob));
       return;
     }
 
@@ -569,11 +717,35 @@ function runClaudeSend(params = {}) {
     let streamSessionId = null;
     let lastProgressAt = Date.now();
     let inactivityTimedOut = false;
+    let hardTimedOut = false;
+    const job = {
+      jobId,
+      threadId,
+      status: 'running',
+      cwd,
+      model,
+      permissionMode,
+      sessionId,
+      promptPreview: prompt.slice(0, 1000),
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      completedAt: null,
+      exitCode: null,
+      text: '',
+      stdout: '',
+      stderr: '',
+      error: '',
+      pid: null,
+    };
+    writeClaudeJob(job);
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    job.pid = child.pid || null;
+    writeClaudeJob(job);
+    activeClaudeJobIDs.add(jobId);
 
     const finish = (payload) => {
       if (settled) return;
@@ -582,6 +754,7 @@ function runClaudeSend(params = {}) {
     };
 
     const timer = setTimeout(() => {
+      hardTimedOut = true;
       stderr += `\nTimed out after ${timeoutMs}ms`;
       child.kill('SIGTERM');
       setTimeout(() => child.kill('SIGKILL'), 2000).unref();
@@ -631,19 +804,22 @@ function runClaudeSend(params = {}) {
     child.on('error', (error) => {
       clearTimeout(timer);
       clearInterval(inactivityTimer);
-      finish({
-        result: {
-          text: '',
-          stdout: trimCommandOutput(stdout),
-          stderr: trimCommandOutput(`${stderr}\n${error.message}`.trim()),
-          exitCode: -1,
-          claudeBin: CLAUDE_BIN,
-        },
-      });
+      activeClaudeJobIDs.delete(jobId);
+      job.status = 'failed';
+      job.text = '';
+      job.stdout = stdout;
+      job.stderr = `${stderr}\n${error.message}`.trim();
+      job.error = error.message;
+      job.exitCode = -1;
+      job.completedAt = Date.now();
+      writeClaudeJob(job);
+      resolveClaudeJobWaiters(job);
+      finish(claudeJobResult(job));
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       clearInterval(inactivityTimer);
+      activeClaudeJobIDs.delete(jobId);
       if (stdoutRemainder.trim()) {
         handleClaudeStreamLine(stdoutRemainder.trim());
       }
@@ -651,16 +827,18 @@ function runClaudeSend(params = {}) {
         stderr = `${stderr}\nTerminated by signal ${signal}`.trim();
       }
       const parsed = parseClaudeJsonLine(stdout.trim().split('\n').filter(Boolean).pop() || stdout.trim());
-      finish({
-        result: {
-          text: resultText || extractClaudeText(parsed, stdout),
-          sessionId: streamSessionId || extractClaudeSessionID(parsed, stdout),
-          stdout: trimCommandOutput(stdout),
-          stderr: trimCommandOutput(stderr),
-          exitCode: inactivityTimedOut ? -1 : (Number.isInteger(code) ? code : -1),
-          claudeBin: CLAUDE_BIN,
-        },
-      });
+      const exitCode = inactivityTimedOut || hardTimedOut ? -1 : (Number.isInteger(code) ? code : -1);
+      job.status = exitCode === 0 ? 'completed' : 'failed';
+      job.text = resultText || extractClaudeText(parsed, stdout);
+      job.sessionId = streamSessionId || extractClaudeSessionID(parsed, stdout);
+      job.stdout = stdout;
+      job.stderr = stderr;
+      job.exitCode = exitCode;
+      job.error = exitCode === 0 ? '' : (stderr || `Claude exited with code ${exitCode}`);
+      job.completedAt = Date.now();
+      writeClaudeJob(job);
+      resolveClaudeJobWaiters(job);
+      finish(claudeJobResult(job));
     });
   });
 }
@@ -756,6 +934,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
     'local/claude/status',
     'local/claude/models',
     'local/claude/listSessions',
+    'local/claude/jobStatus',
     'local/claude/send',
   ].includes(incoming.method)) {
     return false;
@@ -784,8 +963,10 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
                   ? await runClaudeModels()
                   : incoming.method === 'local/claude/listSessions'
                     ? listClaudeSessions(incoming.params || {})
-                    : incoming.method === 'local/claude/send'
-                      ? await runClaudeSend(incoming.params || {})
+                    : incoming.method === 'local/claude/jobStatus'
+                      ? claudeJobStatus(incoming.params || {})
+                      : incoming.method === 'local/claude/send'
+                        ? await runClaudeSend(incoming.params || {})
         : await runLocalExec(incoming.params);
   if (client.readyState === WebSocket.OPEN) {
     const payload = {
@@ -802,6 +983,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
         'local/claude/status',
         'local/claude/models',
         'local/claude/listSessions',
+        'local/claude/jobStatus',
         'local/claude/send',
       ].includes(incoming.method)
         ? JSON.stringify(payload)
