@@ -392,7 +392,12 @@ install_bridge_assets() {
 
   write_bridge_package_json
   log "Installing bridge dependencies"
-  DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$BRIDGE_DIR" --omit=dev
+  if ! DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$BRIDGE_DIR" --omit=dev; then
+    warn "Bridge dependency install failed. DexRelay will try the bundled npm package dependencies and can be repaired with dexrelay repair."
+  fi
+  if ! NODE_PATH="$BRIDGE_DIR/node_modules:$LOCAL_PAYLOAD_ROOT/node_modules:${NODE_PATH:-}" node -e 'require("ws"); require("qrcode-terminal")' >/dev/null 2>&1; then
+    warn "Bridge dependencies are not fully available yet. Run dexrelay repair if bridge startup fails."
+  fi
 }
 
 install_helper_assets() {
@@ -860,6 +865,7 @@ write_start_script() {
 set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\$PATH"
+export NODE_PATH="$BRIDGE_DIR/node_modules:$LOCAL_PAYLOAD_ROOT/node_modules:\${NODE_PATH:-}"
 cd "$BRIDGE_DIR"
 
 NODE_BIN="\$(command -v node)"
@@ -954,6 +960,7 @@ write_relay_server_start_script() {
 set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\$PATH"
+export NODE_PATH="$BRIDGE_DIR/node_modules:$LOCAL_PAYLOAD_ROOT/node_modules:\${NODE_PATH:-}"
 cd "$BRIDGE_DIR"
 
 NODE_BIN="\$(command -v node)"
@@ -976,6 +983,7 @@ write_relay_connector_start_script() {
 set -euo pipefail
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\$PATH"
+export NODE_PATH="$BRIDGE_DIR/node_modules:$LOCAL_PAYLOAD_ROOT/node_modules:\${NODE_PATH:-}"
 cd "$BRIDGE_DIR"
 
 NODE_BIN="\$(command -v node)"

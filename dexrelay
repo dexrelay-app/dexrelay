@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.40}"
+VERSION="${VERSION:-0.1.41}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -357,7 +357,11 @@ bridge_package_json_path() {
 }
 
 bridge_qr_module_path() {
-  printf '%s\n' "$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+  if [[ -d "$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal" ]]; then
+    printf '%s\n' "$RUNTIME_ROOT/bridge/node_modules/qrcode-terminal"
+    return 0
+  fi
+  printf '%s\n' "$PAYLOAD_ROOT/node_modules/qrcode-terminal"
 }
 
 bridge_qr_renderer_ready() {
@@ -390,7 +394,8 @@ ensure_bridge_dependencies() {
   [[ -f "$package_json" ]] || return 1
   command_exists npm || return 1
 
-  DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$RUNTIME_ROOT/bridge" --omit=dev >/dev/null 2>&1
+  DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$RUNTIME_ROOT/bridge" --omit=dev >/dev/null 2>&1 || true
+  NODE_PATH="$RUNTIME_ROOT/bridge/node_modules:$PAYLOAD_ROOT/node_modules:${NODE_PATH:-}" node -e 'require("ws"); require("qrcode-terminal")' >/dev/null 2>&1
 }
 
 render_pairing_qr() {
