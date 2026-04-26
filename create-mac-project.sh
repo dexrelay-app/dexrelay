@@ -67,6 +67,17 @@ module_dir="$project_root/$safe_token"
 project_file="$safe_token.xcodeproj"
 project_bundle_id="$BUNDLE_PREFIX.$bundle_suffix"
 app_struct_name="${safe_token}App"
+development_team_settings=""
+project_sdkroot="iphoneos"
+project_supported_platforms="iphoneos iphonesimulator"
+project_deployment_key="IPHONEOS_DEPLOYMENT_TARGET"
+project_deployment_target="17.0"
+targeted_device_family_setting='				TARGETED_DEVICE_FAMILY = "1,2";'
+indirect_input_setting='				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;'
+
+if [[ -n "$TEAM_ID" ]]; then
+  development_team_settings=$'				DEVELOPMENT_TEAM = '"$TEAM_ID"$';\n'
+fi
 
 if [[ -e "$project_root" ]]; then
   echo "Project already exists at $project_root" >&2
@@ -100,7 +111,16 @@ PY
   exit 0
 fi
 
-if [[ "$PROJECT_KIND" != "ios-app" ]]; then
+if [[ "$PROJECT_KIND" == "mac-app" ]]; then
+  project_sdkroot="macosx"
+  project_supported_platforms="macosx"
+  project_deployment_key="MACOSX_DEPLOYMENT_TARGET"
+  project_deployment_target="14.0"
+  targeted_device_family_setting=""
+  indirect_input_setting=""
+fi
+
+if [[ "$PROJECT_KIND" != "ios-app" && "$PROJECT_KIND" != "mac-app" ]]; then
   echo "Unsupported kind: $PROJECT_KIND" >&2
   exit 1
 fi
@@ -149,6 +169,34 @@ struct ContentView: View {
 }
 SWIFT
 
+if [[ "$PROJECT_KIND" == "mac-app" ]]; then
+cat > "$module_dir/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>\$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleExecutable</key>
+    <string>\$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>\$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>\$(PRODUCT_NAME)</string>
+    <key>CFBundleDisplayName</key>
+    <string>$trimmed_name</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+</dict>
+</plist>
+PLIST
+else
 cat > "$module_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -197,6 +245,7 @@ cat > "$module_dir/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+fi
 
 cat > "$module_dir/Assets.xcassets/Contents.json" <<JSON
 {
@@ -207,6 +256,68 @@ cat > "$module_dir/Assets.xcassets/Contents.json" <<JSON
 }
 JSON
 
+if [[ "$PROJECT_KIND" == "mac-app" ]]; then
+cat > "$module_dir/Assets.xcassets/AppIcon.appiconset/Contents.json" <<JSON
+{
+  "images" : [
+    {
+      "idiom" : "mac",
+      "scale" : "1x",
+      "size" : "16x16"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "2x",
+      "size" : "16x16"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "1x",
+      "size" : "32x32"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "2x",
+      "size" : "32x32"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "1x",
+      "size" : "128x128"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "2x",
+      "size" : "128x128"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "1x",
+      "size" : "256x256"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "2x",
+      "size" : "256x256"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "1x",
+      "size" : "512x512"
+    },
+    {
+      "idiom" : "mac",
+      "scale" : "2x",
+      "size" : "512x512"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+JSON
+else
 cat > "$module_dir/Assets.xcassets/AppIcon.appiconset/Contents.json" <<JSON
 {
   "images" : [
@@ -262,6 +373,7 @@ cat > "$module_dir/Assets.xcassets/AppIcon.appiconset/Contents.json" <<JSON
   }
 }
 JSON
+fi
 
 cat > "$project_root/$project_file/project.pbxproj" <<PBX
 // !\$*UTF8*\$!
@@ -451,11 +563,11 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				${project_deployment_key} = ${project_deployment_target};
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = iphoneos;
+				SDKROOT = ${project_sdkroot};
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -505,10 +617,10 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				${project_deployment_key} = ${project_deployment_target};
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				SDKROOT = iphoneos;
+				SDKROOT = ${project_sdkroot};
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -520,10 +632,9 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = $TEAM_ID;
-				GENERATE_INFOPLIST_FILE = NO;
+${development_team_settings}				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "$safe_token/Info.plist";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+${indirect_input_setting}
 				LD_RUNPATH_SEARCH_PATHS = (
 					"\$(inherited)",
 					"@executable_path/Frameworks",
@@ -531,10 +642,10 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = $project_bundle_id;
 				PRODUCT_NAME = "\$(TARGET_NAME)";
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTED_PLATFORMS = "$project_supported_platforms";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+${targeted_device_family_setting}
 			};
 			name = Debug;
 		};
@@ -544,10 +655,9 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = $TEAM_ID;
-				GENERATE_INFOPLIST_FILE = NO;
+${development_team_settings}				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "$safe_token/Info.plist";
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+${indirect_input_setting}
 				LD_RUNPATH_SEARCH_PATHS = (
 					"\$(inherited)",
 					"@executable_path/Frameworks",
@@ -555,10 +665,10 @@ cat > "$project_root/$project_file/project.pbxproj" <<PBX
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = $project_bundle_id;
 				PRODUCT_NAME = "\$(TARGET_NAME)";
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTED_PLATFORMS = "$project_supported_platforms";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+${targeted_device_family_setting}
 			};
 			name = Release;
 		};
