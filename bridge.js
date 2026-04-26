@@ -28,6 +28,7 @@ const RECENT_TURN_REQUEST_GRACE_MS = Number(process.env.RECENT_TURN_REQUEST_GRAC
 const RECENT_SESSION_ACTIVITY_GRACE_MS = Number(process.env.RECENT_SESSION_ACTIVITY_GRACE_MS || 90 * 1000);
 const CLAUDE_JOB_DIR = process.env.CLAUDE_JOB_DIR
   || path.join(os.homedir(), 'Library/Application Support/DexRelay/runtime/claude-jobs');
+const CLAUDE_STALE_JOB_GRACE_MS = Number(process.env.CLAUDE_STALE_JOB_GRACE_MS || 10 * 1000);
 const sessionHistoryCache = new Map();
 const activeClaudeJobIDs = new Set();
 const claudeJobWaiters = new Map();
@@ -408,6 +409,165 @@ function parseClaudeJsonLine(line) {
   }
 }
 
+function claudeTextFromMessage(message) {
+  if (!message || typeof message !== 'object') return '';
+  const content = message.content;
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (typeof part?.text === 'string') return part.text;
+        if (typeof part?.content === 'string') return part.content;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+function clipClaudeSummaryText(value, limit = 280) {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 3).trim()}...`;
+}
+
+function summarizeClaudeProgressEvent(parsed) {
+  if (!parsed || typeof parsed !== 'object') return '';
+
+  if (parsed.type === 'system') {
+    const subtype = typeof parsed.subtype === 'string' ? parsed.subtype : '';
+    if (subtype === 'init') return 'Claude session started';
+    return subtype ? `Claude ${subtype.replace(/_/g, ' ')}` : 'Claude is preparing';
+  }
+
+  if (parsed.type === 'result') {
+    return 'Claude finished';
+  }
+
+  const content = Array.isArray(parsed.message?.content) ? parsed.message.content : parsed.content;
+  if (Array.isArray(content)) {
+    const toolUse = content.find((part) => part && typeof part === 'object' && part.type === 'tool_use');
+    if (toolUse) {
+      return `Claude is using ${toolUse.name || 'a tool'}`;
+    }
+    const hasText = content.some((part) => typeof part?.text === 'string' && part.text.trim());
+    if (hasText) return 'Claude is writing';
+  }
+
+  if (parsed.type === 'stream_event' && parsed.event && typeof parsed.event === 'object') {
+    const event = parsed.event;
+    switch (event.type) {
+      case 'message_start':
+        return 'Claude started responding';
+      case 'content_block_start': {
+        const block = event.content_block || {};
+        if (block.type === 'tool_use') return `Claude is using ${block.name || 'a tool'}`;
+        if (block.type === 'text') return 'Claude is writing';
+        if (block.type === 'thinking') return 'Claude is thinking';
+        return '';
+      }
+      case 'content_block_delta': {
+        const delta = event.delta || {};
+        if (delta.type === 'text_delta') return 'Claude is writing';
+        if (delta.type === 'thinking_delta') return 'Claude is thinking';
+        return '';
+      }
+      case 'message_delta':
+        return event.delta?.stop_reason ? 'Claude is finishing up' : '';
+      case 'message_stop':
+        return 'Claude finished writing';
+      default:
+        return '';
+    }
+  }
+
+  return '';
+}
+
+function appendClaudeProgressEvent(job, text) {
+  const trimmed = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+  if (!job || !trimmed) return;
+  const events = Array.isArray(job.events) ? job.events : [];
+  if (events[events.length - 1]?.text === trimmed) return;
+  events.push({
+    id: events.length + 1,
+    text: trimmed,
+    timestamp: Date.now(),
+  });
+  job.events = events.slice(-80);
+  writeClaudeJob(job);
+}
+
+function summarizeClaudeSessionFile(filePath, stats, fallbackSessionId) {
+  const maxBytes = 1024 * 1024;
+  let raw = '';
+  try {
+    raw = readFileSync(filePath, 'utf8');
+    if (raw.length > maxBytes) {
+      raw = raw.slice(-maxBytes);
+      const firstNewline = raw.indexOf('\n');
+      if (firstNewline >= 0) raw = raw.slice(firstNewline + 1);
+    }
+  } catch (_) {
+    raw = '';
+  }
+
+  let sessionId = fallbackSessionId;
+  let cwd = null;
+  let gitBranch = null;
+  let version = null;
+  let firstUser = '';
+  let lastUser = '';
+  let lastAssistant = '';
+  let messageCount = 0;
+  let updatedAtMs = stats.mtimeMs;
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const parsed = parseClaudeJsonLine(line);
+    if (!parsed || typeof parsed !== 'object') continue;
+
+    if (typeof parsed.sessionId === 'string' && parsed.sessionId.trim()) sessionId = parsed.sessionId.trim();
+    if (typeof parsed.session_id === 'string' && parsed.session_id.trim()) sessionId = parsed.session_id.trim();
+    if (typeof parsed.cwd === 'string' && parsed.cwd.trim()) cwd = parsed.cwd.trim();
+    if (typeof parsed.gitBranch === 'string' && parsed.gitBranch.trim()) gitBranch = parsed.gitBranch.trim();
+    if (typeof parsed.version === 'string' && parsed.version.trim()) version = parsed.version.trim();
+    if (typeof parsed.timestamp === 'string') {
+      const time = Date.parse(parsed.timestamp);
+      if (Number.isFinite(time)) updatedAtMs = Math.max(updatedAtMs, time);
+    }
+
+    const role = parsed.message?.role || parsed.type;
+    const text = claudeTextFromMessage(parsed.message);
+    if (!text) continue;
+    messageCount += 1;
+    if (role === 'user') {
+      if (!firstUser) firstUser = text;
+      lastUser = text;
+    } else if (role === 'assistant') {
+      lastAssistant = text;
+    }
+  }
+
+  const titleSource = firstUser || lastUser || lastAssistant || 'Claude Code Thread';
+  const previewSource = lastAssistant || lastUser || firstUser || 'Claude Code session';
+  return {
+    sessionId,
+    sessionPath: filePath,
+    cwd,
+    title: clipClaudeSummaryText(titleSource, 88),
+    preview: clipClaudeSummaryText(previewSource, 320),
+    updatedAt: updatedAtMs,
+    size: stats.size,
+    messageCount,
+    gitBranch,
+    version,
+  };
+}
+
 function extractClaudeText(parsed, stdout) {
   if (!parsed || typeof parsed !== 'object') {
     return stdout.trim();
@@ -499,6 +659,7 @@ function runClaudeModels() {
 function listClaudeSessions(params = {}) {
   const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
   const projectDir = path.join(os.homedir(), '.claude', 'projects', claudeProjectKeyForPath(cwd));
+  const limit = Math.max(1, Math.min(50, Number(params.limit) || 20));
   if (!existsSync(projectDir)) {
     return { result: { sessions: [], projectDir } };
   }
@@ -510,15 +671,10 @@ function listClaudeSessions(params = {}) {
       .map((name) => {
         const filePath = path.join(projectDir, name);
         const stats = statSync(filePath);
-        return {
-          sessionId: name.replace(/\.jsonl$/, ''),
-          sessionPath: filePath,
-          updatedAt: stats.mtimeMs,
-          size: stats.size,
-        };
+        return summarizeClaudeSessionFile(filePath, stats, name.replace(/\.jsonl$/, ''));
       })
       .sort((left, right) => right.updatedAt - left.updatedAt)
-      .slice(0, 20);
+      .slice(0, limit);
   } catch (error) {
     return { error: { code: -32603, message: `Could not list Claude sessions: ${error.message}` } };
   }
@@ -578,6 +734,7 @@ function mobileClaudeJob(job) {
     stdout: trimCommandOutput(job.stdout || ''),
     stderr: trimCommandOutput(job.stderr || ''),
     error: typeof job.error === 'string' ? job.error : '',
+    events: Array.isArray(job.events) ? job.events.slice(-40) : [],
   };
 }
 
@@ -631,10 +788,40 @@ function latestClaudeJobForThread(threadID) {
   return best;
 }
 
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function reconcileClaudeJobForStatus(job) {
+  if (!job || job.status !== 'running' || activeClaudeJobIDs.has(job.jobId)) {
+    return job;
+  }
+  const updatedAt = Number.isFinite(job.updatedAt) ? job.updatedAt : 0;
+  if (processIsAlive(job.pid) && Date.now() - updatedAt < 600000) {
+    return job;
+  }
+  if (Date.now() - updatedAt < CLAUDE_STALE_JOB_GRACE_MS) {
+    return job;
+  }
+  job.status = 'failed';
+  job.error = 'Claude job was interrupted before completion.';
+  job.stderr = `${job.stderr || ''}\nClaude job was interrupted before completion.`.trim();
+  job.exitCode = -1;
+  job.completedAt = Date.now();
+  writeClaudeJob(job);
+  return job;
+}
+
 function claudeJobStatus(params = {}) {
   const jobID = sanitizeClaudeJobID(params.jobId);
   const threadID = typeof params.threadId === 'string' ? params.threadId.trim() : '';
-  const job = jobID ? readClaudeJob(jobID) : latestClaudeJobForThread(threadID);
+  const job = reconcileClaudeJobForStatus(jobID ? readClaudeJob(jobID) : latestClaudeJobForThread(threadID));
   if (!job) {
     return { result: { found: false, jobId: jobID || null, threadId: threadID || null } };
   }
@@ -735,6 +922,7 @@ function runClaudeSend(params = {}) {
       stdout: '',
       stderr: '',
       error: '',
+      events: [],
       pid: null,
     };
     writeClaudeJob(job);
@@ -775,6 +963,7 @@ function runClaudeSend(params = {}) {
     const handleClaudeStreamLine = (line) => {
       const parsed = parseClaudeJsonLine(line);
       if (!parsed || typeof parsed !== 'object') return;
+      appendClaudeProgressEvent(job, summarizeClaudeProgressEvent(parsed));
       const directSessionId = parsed.session_id || parsed.sessionId || parsed.sessionID;
       if (typeof directSessionId === 'string' && directSessionId.trim()) {
         streamSessionId = directSessionId.trim();
