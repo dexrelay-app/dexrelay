@@ -159,8 +159,11 @@ async function main() {
   });
 
   if (exitCode !== 0) {
-    log(`DexRelay runtime install failed after ${formatDuration(Date.now() - startTime)}.`);
-    process.exit(exitCode);
+    log(`DexRelay runtime bootstrap did not finish after ${formatDuration(Date.now() - startTime)}.`);
+    log("The dexrelay CLI was still installed. Run `dexrelay status` or `dexrelay repair` to finish setup.");
+    log("Set DEXRELAY_STRICT_POSTINSTALL=1 if you want npm install to fail when bootstrap fails.");
+    terminalWriter?.close();
+    process.exit(process.env.DEXRELAY_STRICT_POSTINSTALL === "1" ? exitCode : 0);
   }
 
   log(`DexRelay runtime install finished in ${formatDuration(Date.now() - startTime)}.`);
