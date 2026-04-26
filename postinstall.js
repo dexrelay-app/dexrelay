@@ -107,26 +107,22 @@ async function main() {
       ...process.env,
       CODEX_RELAY_AUTO_INSTALL: "1",
       CODEX_RELAY_INSTALL_MODE: "npm-postinstall",
+      HOMEBREW_NO_AUTO_UPDATE: process.env.HOMEBREW_NO_AUTO_UPDATE || "1",
     },
   });
 
   let lastVisibleUpdateAt = Date.now();
-  let heartbeatCount = 0;
-  const heartbeatMessages = [
-    "Still working: checking macOS prerequisites and network access.",
-    "Still working: installing the DexRelay bridge and helper.",
-    "Still working: starting background services and waiting for them to listen.",
-    "Still working: verifying that your Mac connection path is healthy.",
-  ];
+  let lastInstallerLine = "starting DexRelay runtime install";
 
   const heartbeat = setInterval(() => {
     const idleMs = Date.now() - lastVisibleUpdateAt;
     if (idleMs < 4000) {
       return;
     }
-    const message = heartbeatMessages[Math.min(heartbeatCount, heartbeatMessages.length - 1)];
-    heartbeatCount += 1;
-    log(`${message} Elapsed ${formatDuration(Date.now() - startTime)}.`);
+    const detail = lastInstallerLine.length > 120
+      ? `${lastInstallerLine.slice(0, 117)}...`
+      : lastInstallerLine;
+    log(`Still working after: ${detail}. Elapsed ${formatDuration(Date.now() - startTime)}.`);
     lastVisibleUpdateAt = Date.now();
   }, 4000);
 
@@ -137,6 +133,7 @@ async function main() {
       if (!line.trim()) {
         return;
       }
+      lastInstallerLine = line.trim();
       write(`${prefix}${line}`);
     });
     return rl;

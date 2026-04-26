@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Homebrew auto-update is often the slowest part of a clean office-Mac install,
+# and it can sit quietly for minutes before we even start DexRelay runtime setup.
+export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
+
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -234,12 +238,29 @@ EOF
   log "Installed tailscale PATH wrapper at $wrapper_target"
 }
 
+should_install_tailscale_now() {
+  if [[ "${CODEX_RELAY_INSTALL_TAILSCALE:-}" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${CODEX_RELAY_AUTO_INSTALL:-}" == "1" || "${CODEX_RELAY_INSTALL_MODE:-}" == "npm-postinstall" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
 ensure_tailscale_installed() {
   local tailscale_cli=""
   tailscale_cli="$(resolve_tailscale_cli || true)"
   if [[ -n "$tailscale_cli" ]]; then
     ensure_tailscale_cli_on_path "$tailscale_cli"
     log "Tailscale CLI already available at $tailscale_cli"
+    return 0
+  fi
+
+  if ! should_install_tailscale_now; then
+    warn "Tailscale is not installed; continuing DexRelay install without blocking npm. Local Wi-Fi pairing still works. Install Tailscale later for remote access, or rerun with CODEX_RELAY_INSTALL_TAILSCALE=1."
     return 0
   fi
 
@@ -1451,7 +1472,7 @@ show_next_steps() {
   printf "1. Open Codex Relay on your iPhone or iPad.\n"
   printf "2. On this Mac, run: dexrelay pair\n"
   printf "3. In the app, tap Scan Connection QR and scan the code from Terminal.\n"
-  printf "4. Install Tailscale on your iPhone and sign in on both devices with the same account for remote access away from local Wi-Fi.\n"
+  printf "4. Optional: install Tailscale on your Mac and iPhone for remote access away from local Wi-Fi.\n"
   printf "\nInstalled files:\n"
   printf -- "- Runtime root: %s\n" "$INSTALL_ROOT"
   printf -- "- Admin workspace: %s\n" "$ADMIN_PROJECT_ROOT"

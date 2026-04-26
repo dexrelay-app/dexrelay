@@ -310,28 +310,50 @@ function parseSessionMessages(fileText) {
       continue;
     }
 
-    if (record?.type !== 'response_item') continue;
-    const payload = record.payload;
-    if (!payload || payload.type !== 'message') continue;
-    const role = payload.role;
-    if (!['user', 'assistant'].includes(role)) continue;
+    if (record?.type === 'response_item') {
+      const payload = record.payload;
+      if (!payload || payload.type !== 'message') continue;
+      const role = payload.role;
+      if (!['user', 'assistant'].includes(role)) continue;
 
-    const text = extractSessionMessageText(payload.content, role);
-    const attachments = extractSessionAttachments(payload.content);
-    if (!text && attachments.length === 0) continue;
+      const text = extractSessionMessageText(payload.content, role);
+      const attachments = extractSessionAttachments(payload.content);
+      if (!text && attachments.length === 0) continue;
 
-    const itemID =
-      (typeof payload.id === 'string' && payload.id.trim()) ||
+      const itemID =
+        (typeof payload.id === 'string' && payload.id.trim()) ||
+        (typeof record.id === 'string' && record.id.trim()) ||
+        `session-${index}`;
+
+      messages.push({
+        id: itemID,
+        role,
+        text: text || '',
+        createdAt: sessionTimestampToEpochSeconds(record.timestamp),
+        sortIndex: messages.length,
+        attachments,
+      });
+      continue;
+    }
+
+    const claudeRole = record.message?.role || record.type;
+    if (!['user', 'assistant'].includes(claudeRole)) continue;
+    const claudeText = claudeTextFromMessage(record.message);
+    if (!claudeText) continue;
+
+    const claudeItemID =
+      (typeof record.uuid === 'string' && record.uuid.trim()) ||
+      (typeof record.message?.id === 'string' && record.message.id.trim()) ||
       (typeof record.id === 'string' && record.id.trim()) ||
-      `session-${index}`;
+      `claude-session-${index}`;
 
     messages.push({
-      id: itemID,
-      role,
-      text: text || '',
+      id: claudeItemID,
+      role: claudeRole,
+      text: claudeText,
       createdAt: sessionTimestampToEpochSeconds(record.timestamp),
       sortIndex: messages.length,
-      attachments,
+      attachments: [],
     });
   }
 
