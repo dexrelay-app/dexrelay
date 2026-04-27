@@ -61,6 +61,10 @@ bundle_suffix="$(printf '%s' "$trimmed_name" | tr '[:upper:]' '[:lower:]' | tr -
 if [[ -z "$bundle_suffix" ]]; then
   bundle_suffix="app$(date +%s)"
 fi
+package_slug="$(printf '%s' "$trimmed_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//')"
+if [[ -z "$package_slug" ]]; then
+  package_slug="web-app-$(date +%s)"
+fi
 
 project_root="$trimmed_base/$trimmed_name"
 module_dir="$project_root/$safe_token"
@@ -104,6 +108,587 @@ print(json.dumps({
   "kind": sys.argv[2],
   "projectFile": None,
   "scheme": None,
+  "gitRoot": git_info.get("gitRoot"),
+  "gitBranch": git_info.get("branch"),
+}))
+PY
+  exit 0
+fi
+
+if [[ "$PROJECT_KIND" == "web-app" ]]; then
+  mkdir -p "$project_root/src"
+  mkdir -p "$project_root/public"
+
+  cat > "$project_root/package.json" <<JSON
+{
+  "name": "$package_slug",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "lint": "eslint .",
+    "typecheck": "tsc -b --pretty"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.0.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.0.0",
+    "vite": "^6.0.0"
+  }
+}
+JSON
+
+  cat > "$project_root/index.html" <<HTML
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="$trimmed_name is a Vite React TypeScript app scaffolded by DexRelay."
+    />
+    <title>$trimmed_name</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+HTML
+
+  cat > "$project_root/vite.config.ts" <<'TS'
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+})
+TS
+
+  cat > "$project_root/tsconfig.json" <<'JSON'
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+JSON
+
+  cat > "$project_root/tsconfig.app.json" <<'JSON'
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
+JSON
+
+  cat > "$project_root/tsconfig.node.json" <<'JSON'
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}
+JSON
+
+  cat > "$project_root/eslint.config.js" <<'JS'
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import tseslint from 'typescript-eslint'
+
+export default tseslint.config(
+  { ignores: ['dist'] },
+  {
+    extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    files: ['**/*.{ts,tsx}'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: globals.browser,
+    },
+    plugins: {
+      'react-hooks': reactHooks,
+      'react-refresh': reactRefresh,
+    },
+    rules: {
+      ...reactHooks.configs.recommended.rules,
+      'react-refresh/only-export-components': [
+        'warn',
+        { allowConstantExport: true },
+      ],
+    },
+  },
+)
+JS
+
+  cat > "$project_root/src/main.tsx" <<'TSX'
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import App from './App'
+import './styles.css'
+
+const root = document.getElementById('root')
+
+if (!root) {
+  throw new Error('Root element #root was not found')
+}
+
+createRoot(root).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+TSX
+
+  cat > "$project_root/src/App.tsx" <<TSX
+const metrics = [
+  { label: 'Build system', value: 'Vite' },
+  { label: 'Language', value: 'TypeScript' },
+  { label: 'UI runtime', value: 'React' },
+]
+
+const principles = [
+  'Typed from the first component',
+  'Responsive layout without a CSS framework dependency',
+  'Accessible landmarks, focus states, and contrast',
+]
+
+function App() {
+  return (
+    <main className="app-shell">
+      <section className="hero" aria-labelledby="page-title">
+        <div className="hero__copy">
+          <p className="eyebrow">DexRelay web starter</p>
+          <h1 id="page-title">$trimmed_name</h1>
+          <p className="lede">
+            A production-ready React + TypeScript starter with a clean Vite
+            toolchain, strict compiler settings, and responsive design tokens.
+          </p>
+          <div className="hero__actions" aria-label="Primary actions">
+            <a className="button button--primary" href="#getting-started">
+              Start building
+            </a>
+            <a className="button button--secondary" href="https://vite.dev" target="_blank" rel="noreferrer">
+              Vite docs
+            </a>
+          </div>
+        </div>
+
+        <div className="status-card" aria-label="Project stack">
+          {metrics.map((item) => (
+            <div className="metric" key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel" id="getting-started" aria-labelledby="getting-started-title">
+        <div>
+          <p className="eyebrow">Getting started</p>
+          <h2 id="getting-started-title">Ship the first useful screen, then iterate.</h2>
+        </div>
+        <ol className="steps">
+          <li>
+            <code>npm install</code>
+            <span>Install dependencies.</span>
+          </li>
+          <li>
+            <code>npm run dev</code>
+            <span>Start the local development server.</span>
+          </li>
+          <li>
+            <code>npm run build</code>
+            <span>Typecheck and produce a production build.</span>
+          </li>
+        </ol>
+      </section>
+
+      <section className="principles" aria-label="Starter principles">
+        {principles.map((principle) => (
+          <article key={principle}>
+            <span aria-hidden="true">◆</span>
+            <p>{principle}</p>
+          </article>
+        ))}
+      </section>
+    </main>
+  )
+}
+
+export default App
+TSX
+
+  cat > "$project_root/src/styles.css" <<'CSS'
+:root {
+  color-scheme: light;
+  font-family:
+    ui-sans-serif,
+    "Avenir Next",
+    "Helvetica Neue",
+    system-ui,
+    sans-serif;
+  background: #f7f3ea;
+  color: #151512;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  --ink: #151512;
+  --muted: #676258;
+  --paper: #fffaf0;
+  --paper-strong: #ffffff;
+  --line: #dfd5c2;
+  --accent: #c8a938;
+  --accent-ink: #211b07;
+  --shadow: 0 24px 80px rgb(55 43 18 / 14%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgb(200 169 56 / 18%), transparent 34rem),
+    linear-gradient(135deg, #f7f3ea 0%, #eee7d7 100%);
+}
+
+a {
+  color: inherit;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid rgb(200 169 56 / 70%);
+  outline-offset: 3px;
+}
+
+.app-shell {
+  width: min(1120px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 56px 0;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+  gap: 28px;
+  align-items: stretch;
+}
+
+.hero__copy,
+.status-card,
+.panel,
+.principles article {
+  border: 1px solid var(--line);
+  background: rgb(255 250 240 / 82%);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.hero__copy {
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: clamp(28px, 5vw, 64px);
+  border-radius: 36px;
+}
+
+.eyebrow {
+  margin: 0 0 14px;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 11ch;
+  margin-bottom: 22px;
+  font-size: clamp(3.25rem, 12vw, 8rem);
+  line-height: 0.88;
+  letter-spacing: -0.08em;
+}
+
+h2 {
+  max-width: 14ch;
+  margin-bottom: 0;
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 0.95;
+  letter-spacing: -0.06em;
+}
+
+.lede {
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: clamp(1.05rem, 2vw, 1.25rem);
+  line-height: 1.65;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-weight: 800;
+  text-decoration: none;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.button:hover {
+  transform: translateY(-2px);
+}
+
+.button--primary {
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: 0 12px 30px rgb(21 21 18 / 18%);
+}
+
+.button--secondary {
+  border: 1px solid var(--line);
+  background: var(--paper-strong);
+}
+
+.status-card {
+  display: grid;
+  align-content: end;
+  gap: 16px;
+  padding: 28px;
+  border-radius: 36px;
+}
+
+.metric {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border-radius: 24px;
+  background: rgb(255 255 255 / 60%);
+}
+
+.metric span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.metric strong {
+  font-size: clamp(1.5rem, 3vw, 2.5rem);
+  letter-spacing: -0.05em;
+}
+
+.panel {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(280px, 1.1fr);
+  gap: 28px;
+  margin-top: 28px;
+  padding: clamp(24px, 5vw, 44px);
+  border-radius: 32px;
+}
+
+.steps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps li {
+  display: grid;
+  grid-template-columns: minmax(128px, 0.8fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgb(255 255 255 / 58%);
+}
+
+code {
+  color: var(--accent-ink);
+  font-family: "SFMono-Regular", ui-monospace, monospace;
+  font-weight: 800;
+}
+
+.steps span,
+.principles p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.principles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.principles article {
+  min-height: 150px;
+  padding: 22px;
+  border-radius: 26px;
+}
+
+.principles span {
+  display: inline-block;
+  margin-bottom: 28px;
+  color: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    width: min(100% - 24px, 560px);
+    padding: 28px 0;
+  }
+
+  .hero,
+  .panel,
+  .principles {
+    grid-template-columns: 1fr;
+  }
+
+  .hero__copy {
+    min-height: 440px;
+    border-radius: 28px;
+  }
+
+  .status-card,
+  .panel {
+    border-radius: 28px;
+  }
+
+  .steps li {
+    grid-template-columns: 1fr;
+  }
+}
+CSS
+
+  cat > "$project_root/src/vite-env.d.ts" <<'TS'
+/// <reference types="vite/client" />
+TS
+
+  cat > "$project_root/.gitignore" <<'TXT'
+node_modules
+dist
+.DS_Store
+.env
+.env.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+TXT
+
+  cat > "$project_root/README.md" <<TXT
+# $trimmed_name
+
+Created from DexRelay as a Vite React TypeScript web app.
+
+## Commands
+
+\`\`\`bash
+npm install
+npm run dev
+npm run build
+npm run lint
+\`\`\`
+
+## Project shape
+
+- \`src/App.tsx\` contains the starter product surface.
+- \`src/styles.css\` defines responsive design tokens and layout.
+- \`npm run build\` runs TypeScript project references before Vite builds.
+- \`npm run dev\` binds to \`0.0.0.0\` so DexRelay can expose the local dev server when needed.
+TXT
+
+  if [[ -f "$GOVERNANCECTL_SCRIPT" ]]; then
+    python3 "$GOVERNANCECTL_SCRIPT" update-project --project-path "$project_root" --project-name "$trimmed_name" >/dev/null
+  fi
+  git_info="$("$GIT_AUTOMATION_SCRIPT" --mode ensure --cwd "$project_root")"
+  python3 - <<PY "$project_root" "$PROJECT_KIND" "$git_info"
+import json, sys
+git_info = json.loads(sys.argv[3])
+print(json.dumps({
+  "projectPath": sys.argv[1],
+  "kind": sys.argv[2],
+  "projectFile": None,
+  "scheme": "npm run dev",
   "gitRoot": git_info.get("gitRoot"),
   "gitBranch": git_info.get("branch"),
 }))

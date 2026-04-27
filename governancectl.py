@@ -195,7 +195,19 @@ def detect_project_type(project_path: Path) -> str:
             if "SDKROOT = macosx;" in text or "MACOSX_DEPLOYMENT_TARGET" in text or 'SUPPORTED_PLATFORMS = "macosx";' in text:
                 return "mac-app"
         return "ios-app"
-    if (project_path / "package.json").exists():
+    package_json = project_path / "package.json"
+    if package_json.exists():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            package = {}
+        dependencies = {
+            **(package.get("dependencies") or {}),
+            **(package.get("devDependencies") or {}),
+        }
+        scripts = package.get("scripts") or {}
+        if "vite" in dependencies or ("react" in dependencies and "dev" in scripts):
+            return "web-app"
         return "node-app"
     if (project_path / "pyproject.toml").exists() or (project_path / "requirements.txt").exists():
         return "python-app"
@@ -333,6 +345,8 @@ def inferred_project_description(project_path: Path, project_name: str, project_
         return f"iOS app project for {pretty_name}."
     if project_type == "mac-app":
         return f"Mac app project for {pretty_name}."
+    if project_type == "web-app":
+        return f"Web app project for {pretty_name}."
     if project_type == "node-app":
         return f"Web or Node app for {pretty_name}."
     if project_type == "python-app":
@@ -551,6 +565,45 @@ def default_project_runbook(project_name: str, project_type: str, has_services: 
                     "builtin": "open-latest-install-debug",
                     "cwd": "",
                     "executionMode": "direct-then-codex",
+                },
+            ]
+        )
+    elif project_type == "web-app":
+        primary_action_id = "web-dev-server"
+        actions.extend(
+            [
+                {
+                    "id": "web-install-dependencies",
+                    "title": "Install Dependencies",
+                    "subtitle": "Install the web app dependencies with npm.",
+                    "icon": "shippingbox",
+                    "kind": "shell",
+                    "command": "npm install",
+                    "timeoutMs": 120000,
+                    "executionMode": "direct-then-codex",
+                    "showInQuickActions": True,
+                },
+                {
+                    "id": "web-dev-server",
+                    "title": "Start Web Dev Server",
+                    "subtitle": "Run Vite on all interfaces so DexRelay can expose it.",
+                    "icon": "globe",
+                    "kind": "shell",
+                    "command": "npm run dev",
+                    "timeoutMs": 15000,
+                    "executionMode": "direct-then-codex",
+                    "showInQuickActions": True,
+                },
+                {
+                    "id": "web-build",
+                    "title": "Build Web App",
+                    "subtitle": "Typecheck and create a production build.",
+                    "icon": "hammer",
+                    "kind": "shell",
+                    "command": "npm run build",
+                    "timeoutMs": 120000,
+                    "executionMode": "direct-then-codex",
+                    "showInQuickActions": True,
                 },
             ]
         )
