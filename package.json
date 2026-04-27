@@ -1,6 +1,6 @@
 {
   "name": "dexrelay",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "Mac-side CLI/bootstrap runtime for the DexRelay iPhone app.",
   "main": "bridge.js",
   "bin": {
@@ -30,6 +30,7 @@
     "postinstall.js",
     "prepare-ios-testflight.py",
     "publish-ios-adhoc-ota.sh",
+    "quic-bridge-gateway.swift",
     "rebuild-workspace-services.py",
     "relay-connector.js",
     "relay-server.js",

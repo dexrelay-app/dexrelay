@@ -128,6 +128,11 @@ function registerSocketForPairing(socket, payload) {
 
   const existingRolePeer = state.peers.get(role);
   if (existingRolePeer && existingRolePeer.socket !== socket) {
+    if (role === 'ios_client') {
+      sendError(socket, 'role_in_use', `an ${role} peer is already connected for pairing ${pairingId}`);
+      socket.close(4009, 'role in use');
+      return;
+    }
     try {
       sendError(existingRolePeer.socket, 'peer_replaced', `new ${role} peer registered for pairing ${pairingId}`);
       existingRolePeer.socket.close(4009, 'peer replaced');

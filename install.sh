@@ -44,6 +44,8 @@ RELAY_SERVER_LABEL="${CODEX_RELAY_RELAY_SERVER_LABEL:-com.codexrelay.relayserver
 RELAY_SERVER_PLIST="$LAUNCH_AGENTS_DIR/$RELAY_SERVER_LABEL.plist"
 RELAY_CONNECTOR_LABEL="${CODEX_RELAY_RELAY_CONNECTOR_LABEL:-com.codexrelay.relayconnector.bootstrap}"
 RELAY_CONNECTOR_PLIST="$LAUNCH_AGENTS_DIR/$RELAY_CONNECTOR_LABEL.plist"
+QUIC_GATEWAY_LABEL="${CODEX_RELAY_QUIC_GATEWAY_LABEL:-com.dexrelay.quicgateway.bootstrap}"
+QUIC_GATEWAY_PLIST="$LAUNCH_AGENTS_DIR/$QUIC_GATEWAY_LABEL.plist"
 KEEP_AWAKE="${CODEX_RELAY_KEEP_AWAKE:-1}"
 AWAKE_LABEL="${CODEX_RELAY_KEEP_AWAKE_LABEL:-com.codexrelay.keepawake.bootstrap}"
 AWAKE_PLIST="$LAUNCH_AGENTS_DIR/$AWAKE_LABEL.plist"
@@ -55,6 +57,7 @@ HELPER_PORT="${CODEX_RELAY_HELPER_PORT:-4616}"
 HEALTH_PORT="${CODEX_HEALTH_PORT:-4610}"
 RELAY_SERVER_PORT="${CODEX_RELAY_SERVER_PORT:-4620}"
 RELAY_SERVER_PATH="${CODEX_RELAY_SERVER_PATH:-/relay}"
+QUIC_GATEWAY_PORT="${CODEX_RELAY_QUIC_PORT:-4617}"
 RUNTIME_MANIFEST_PATH="$INSTALL_ROOT/runtime-manifest.json"
 INSTALL_MODE="${CODEX_RELAY_INSTALL_MODE:-direct-install-script}"
 AUTO_INSTALL="${CODEX_RELAY_AUTO_INSTALL:-0}"
@@ -65,6 +68,7 @@ LOCAL_PAYLOAD_ROOT="${CODEX_RELAY_LOCAL_PAYLOAD_ROOT:-$SCRIPT_DIR}"
 LOCAL_BRIDGE_SOURCE="$LOCAL_PAYLOAD_ROOT/bridge.js"
 LOCAL_RELAY_SERVER_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-server.js"
 LOCAL_RELAY_CONNECTOR_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-connector.js"
+LOCAL_QUIC_GATEWAY_SOURCE="$LOCAL_PAYLOAD_ROOT/quic-bridge-gateway.swift"
 LOCAL_PACKAGE_SOURCE="$LOCAL_PAYLOAD_ROOT/package.json"
 LOCAL_HELPER_SOURCE="$LOCAL_PAYLOAD_ROOT/helper.py"
 LOCAL_CREATE_PROJECT_SOURCE="$LOCAL_PAYLOAD_ROOT/create-mac-project.sh"
@@ -87,6 +91,7 @@ LOCAL_HEALTH_UI_STYLES_SOURCE="$LOCAL_PAYLOAD_ROOT/health-ui-styles.css"
 REMOTE_BRIDGE_SOURCE="$SETUP_BASE_URL/bridge.js"
 REMOTE_RELAY_SERVER_SOURCE="$SETUP_BASE_URL/relay-server.js"
 REMOTE_RELAY_CONNECTOR_SOURCE="$SETUP_BASE_URL/relay-connector.js"
+REMOTE_QUIC_GATEWAY_SOURCE="$SETUP_BASE_URL/quic-bridge-gateway.swift"
 REMOTE_PACKAGE_SOURCE="$SETUP_BASE_URL/package.json"
 REMOTE_HELPER_SOURCE="$SETUP_BASE_URL/helper.py"
 REMOTE_CREATE_PROJECT_SOURCE="$SETUP_BASE_URL/create-mac-project.sh"
@@ -390,6 +395,12 @@ install_bridge_assets() {
     curl -fsSL "$REMOTE_RELAY_CONNECTOR_SOURCE" -o "$BRIDGE_DIR/relay-connector.js"
   fi
 
+  if [[ -f "$LOCAL_QUIC_GATEWAY_SOURCE" ]]; then
+    cp "$LOCAL_QUIC_GATEWAY_SOURCE" "$BRIDGE_DIR/quic-bridge-gateway.swift"
+  else
+    curl -fsSL "$REMOTE_QUIC_GATEWAY_SOURCE" -o "$BRIDGE_DIR/quic-bridge-gateway.swift"
+  fi
+
   write_bridge_package_json
   log "Installing bridge dependencies"
   if ! DEXRELAY_SKIP_POSTINSTALL=1 npm install --prefix "$BRIDGE_DIR" --omit=dev; then
@@ -583,6 +594,7 @@ PY
 ),
   "helperPort": $HELPER_PORT,
   "bridgePort": $BRIDGE_PORT,
+  "quicPort": $QUIC_GATEWAY_PORT,
   "healthPort": $HEALTH_PORT,
   "relayServerPort": $RELAY_SERVER_PORT
 }
@@ -906,6 +918,7 @@ exec env \
   CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
   CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
   CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+  CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
   CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
   CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
   CODEX_RELAY_OTA_PUBLIC_ROOT="$OTA_PUBLIC_ROOT" \
@@ -939,6 +952,7 @@ exec env \
   CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
   CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
   CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+  CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
   CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
   CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
   CODEX_RELAY_HEALTHD_LABEL="$HEALTHD_LABEL" \
@@ -946,6 +960,7 @@ exec env \
   CODEX_RELAY_RELAY_SERVER_LABEL="$RELAY_SERVER_LABEL" \
   CODEX_RELAY_RELAY_SERVER_PORT="$RELAY_SERVER_PORT" \
   CODEX_RELAY_RELAY_CONNECTOR_LABEL="$RELAY_CONNECTOR_LABEL" \
+  CODEX_RELAY_QUIC_GATEWAY_LABEL="$QUIC_GATEWAY_LABEL" \
   "\$PYTHON_BIN" "$SCRIPTS_DIR/codex-health-daemon.py"
 EOF
 
@@ -1006,6 +1021,63 @@ EOF
   chmod +x "$BIN_DIR/start-relay-connector.sh"
 }
 
+write_quic_gateway_start_script() {
+  mkdir -p "$BIN_DIR" "$LOG_DIR" "$INSTALL_ROOT/quic"
+
+  cat >"$BIN_DIR/start-quic-gateway.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:\$PATH"
+cd "$BRIDGE_DIR"
+
+SOURCE="$BRIDGE_DIR/quic-bridge-gateway.swift"
+BINARY="$BIN_DIR/quic-bridge-gateway"
+IDENTITY_DIR="$INSTALL_ROOT/quic"
+IDENTITY_P12="\$IDENTITY_DIR/identity.p12"
+IDENTITY_PASSWORD="dexrelay"
+
+mkdir -p "\$IDENTITY_DIR"
+
+if [[ ! -f "\$IDENTITY_P12" ]]; then
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "QUIC gateway idle: openssl is required to create the local identity" >&2
+    exec /bin/sleep 3600
+  fi
+  tmp_dir="\$(mktemp -d "\${TMPDIR:-/tmp}/dexrelay-quic-identity.XXXXXX")"
+  trap 'rm -rf "\$tmp_dir"' EXIT
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=DexRelay QUIC" \
+    -keyout "\$tmp_dir/key.pem" \
+    -out "\$tmp_dir/cert.pem" >/dev/null 2>&1
+  openssl pkcs12 -export \
+    -out "\$IDENTITY_P12" \
+    -inkey "\$tmp_dir/key.pem" \
+    -in "\$tmp_dir/cert.pem" \
+    -passout "pass:\$IDENTITY_PASSWORD" >/dev/null 2>&1
+  chmod 600 "\$IDENTITY_P12"
+fi
+
+if [[ ! -x "\$BINARY" || "\$SOURCE" -nt "\$BINARY" ]]; then
+  if command -v swiftc >/dev/null 2>&1; then
+    swiftc "\$SOURCE" -o "\$BINARY"
+  else
+    echo "QUIC gateway idle: swiftc is not available" >&2
+    exec /bin/sleep 3600
+  fi
+fi
+
+exec env \
+  DEXRELAY_QUIC_PORT="${QUIC_GATEWAY_PORT}" \
+  DEXRELAY_QUIC_BRIDGE_URL="ws://127.0.0.1:${BRIDGE_PORT}" \
+  DEXRELAY_QUIC_IDENTITY_P12="\$IDENTITY_P12" \
+  DEXRELAY_QUIC_IDENTITY_PASSWORD="\$IDENTITY_PASSWORD" \
+  "\$BINARY"
+EOF
+
+  chmod +x "$BIN_DIR/start-quic-gateway.sh"
+}
+
 write_watchdog_start_script() {
   mkdir -p "$BIN_DIR" "$HELPER_LOG_DIR"
 
@@ -1025,11 +1097,14 @@ RELAY_SERVER_LABEL="$RELAY_SERVER_LABEL"
 RELAY_SERVER_PLIST="$RELAY_SERVER_PLIST"
 RELAY_CONNECTOR_LABEL="$RELAY_CONNECTOR_LABEL"
 RELAY_CONNECTOR_PLIST="$RELAY_CONNECTOR_PLIST"
+QUIC_GATEWAY_LABEL="$QUIC_GATEWAY_LABEL"
+QUIC_GATEWAY_PLIST="$QUIC_GATEWAY_PLIST"
 RELAY_STATE_DIR="$RELAY_STATE_DIR"
 BRIDGE_PORT="$BRIDGE_PORT"
 HELPER_PORT="$HELPER_PORT"
 HEALTH_PORT="$HEALTH_PORT"
 RELAY_SERVER_PORT="$RELAY_SERVER_PORT"
+QUIC_GATEWAY_PORT="$QUIC_GATEWAY_PORT"
 INSTALL_SCRIPT_PATH="$SELF_INSTALL_SCRIPT"
 WATCHDOG_INTERVAL_SECONDS=5
 MAX_FAILED_CYCLES=3
@@ -1087,6 +1162,7 @@ repair_runtime() {
     CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
     CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
     CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+    CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
     CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
     CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
     CODEX_RELAY_HEALTHD_LABEL="$HEALTHD_LABEL" \
@@ -1124,6 +1200,11 @@ while true; do
 
   if ! lsof -nP -iTCP:"\$RELAY_SERVER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     restart_agent "\$RELAY_SERVER_LABEL" "\$RELAY_SERVER_PLIST"
+    unhealthy=1
+  fi
+
+  if ! lsof -nP -iUDP:"\$QUIC_GATEWAY_PORT" >/dev/null 2>&1; then
+    restart_agent "\$QUIC_GATEWAY_LABEL" "\$QUIC_GATEWAY_PLIST"
     unhealthy=1
   fi
 
@@ -1303,6 +1384,37 @@ write_relay_connector_launch_agent() {
 EOF
 
   chmod 644 "$RELAY_CONNECTOR_PLIST"
+}
+
+write_quic_gateway_launch_agent() {
+  mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+
+  cat >"$QUIC_GATEWAY_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$QUIC_GATEWAY_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN_DIR/start-quic-gateway.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/quic-gateway.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/quic-gateway.err.log</string>
+</dict>
+</plist>
+EOF
+
+  chmod 644 "$QUIC_GATEWAY_PLIST"
 }
 
 write_watchdog_launch_agent() {
@@ -1521,12 +1633,14 @@ main() {
   write_healthd_start_script
   write_relay_server_start_script
   write_relay_connector_start_script
+  write_quic_gateway_start_script
   write_watchdog_start_script
   write_launch_agent
   write_helper_launch_agent
   write_healthd_launch_agent
   write_relay_server_launch_agent
   write_relay_connector_launch_agent
+  write_quic_gateway_launch_agent
   write_watchdog_launch_agent
   write_awake_launch_agent
 
@@ -1534,6 +1648,7 @@ main() {
   start_helper_launch_agent
   start_launch_agent "$HEALTHD_LABEL" "$HEALTHD_PLIST"
   start_launch_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"
+  start_launch_agent "$QUIC_GATEWAY_LABEL" "$QUIC_GATEWAY_PLIST"
   start_launch_agent "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST"
   maybe_start_relay_connector_launch_agent
   start_launch_agent "$WATCHDOG_LABEL" "$WATCHDOG_PLIST"

@@ -44,6 +44,7 @@ PROJECTS_ROOT = os.environ.get("CODEX_RELAY_PROJECTS_ROOT", os.path.expanduser("
 ADMIN_PROJECT_ROOT = os.environ.get("CODEX_RELAY_ADMIN_PROJECT_ROOT", os.path.join(PROJECTS_ROOT, "DexRelay Admin"))
 BRIDGE_LABEL = os.environ.get("CODEX_RELAY_LABEL", "com.codexrelay.bootstrap")
 BRIDGE_PORT = int(os.environ.get("CODEX_RELAY_BRIDGE_PORT", "4615"))
+QUIC_GATEWAY_PORT = int(os.environ.get("CODEX_RELAY_QUIC_PORT", "4617"))
 HELPER_LABEL = os.environ.get("CODEX_RELAY_HELPER_LABEL", "com.codexrelay.setuphelper")
 HELPER_PORT = int(os.environ.get("CODEX_RELAY_HELPER_PORT", "4616"))
 KEEP_AWAKE_LABEL = os.environ.get("CODEX_RELAY_KEEP_AWAKE_LABEL", "com.codexrelay.keepawake.bootstrap")
@@ -127,13 +128,14 @@ def fallback_pairing_hosts(snapshot, primary_host: str):
                 yield trimmed
 
 
-def build_pairing_uri(pairing_id: str, token: str, host: str, helper_port: int, bridge_port: int, expires_at: str, alt_hosts=None):
+def build_pairing_uri(pairing_id: str, token: str, host: str, helper_port: int, bridge_port: int, quic_port: int, expires_at: str, alt_hosts=None):
     query = urlencode({
         "id": pairing_id,
         "token": token,
         "host": host,
         "helperPort": helper_port,
         "bridgePort": bridge_port,
+        "quicPort": quic_port,
         "expiresAt": expires_at,
         "altHost": list(alt_hosts or []),
     }, doseq=True)
@@ -194,6 +196,7 @@ def create_pairing(device_name=None):
         "altHosts": fallback_hosts,
         "helperPort": HELPER_PORT,
         "bridgePort": BRIDGE_PORT,
+        "quicPort": QUIC_GATEWAY_PORT,
         "createdAt": now_iso(),
         "expiresAt": expires_at,
         "claimedAt": None,
@@ -209,9 +212,10 @@ def create_pairing(device_name=None):
     return {
         "pairingId": pairing_id,
         "pairingToken": token,
-        "pairingURI": build_pairing_uri(pairing_id, token, host, HELPER_PORT, BRIDGE_PORT, expires_at, fallback_hosts),
+        "pairingURI": build_pairing_uri(pairing_id, token, host, HELPER_PORT, BRIDGE_PORT, QUIC_GATEWAY_PORT, expires_at, fallback_hosts),
         "helperPort": HELPER_PORT,
         "bridgePort": BRIDGE_PORT,
+        "quicPort": QUIC_GATEWAY_PORT,
         "preferredHost": host,
         "displayName": display_name,
         "expiresAt": expires_at,
@@ -286,6 +290,7 @@ state = {
     "statusMessage": "Setup helper is idle",
     "bridgeReachable": False,
     "bridgePort": BRIDGE_PORT,
+    "quicPort": QUIC_GATEWAY_PORT,
     "installRoot": INSTALL_ROOT,
     "defaultInstallRoot": DEFAULT_RUNTIME_ROOT,
     "otaPublicRoot": OTA_PUBLIC_ROOT,

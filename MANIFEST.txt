@@ -4,6 +4,7 @@ Public bootstrap payload for Cloudflare:
 - bridge.js
 - relay-server.js
 - relay-connector.js
+- quic-bridge-gateway.swift
 - package.json
 - dexrelay
 - helper.py

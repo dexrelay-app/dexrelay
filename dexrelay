@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.44}"
+VERSION="${VERSION:-0.1.46}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -38,6 +38,7 @@ resolve_runtime_root() {
 RUNTIME_ROOT="$(resolve_runtime_root)"
 BRIDGE_PORT="${CODEX_RELAY_BRIDGE_PORT:-4615}"
 HELPER_PORT="${CODEX_RELAY_HELPER_PORT:-4616}"
+QUIC_GATEWAY_PORT="${CODEX_RELAY_QUIC_PORT:-4617}"
 RELAY_SERVER_PORT="${CODEX_RELAY_SERVER_PORT:-4620}"
 BRIDGE_LABEL="${CODEX_RELAY_BRIDGE_LABEL:-com.codexrelay.bootstrap}"
 HELPER_LABEL="${CODEX_RELAY_HELPER_LABEL:-com.codexrelay.setuphelper}"
@@ -45,12 +46,14 @@ WATCHDOG_LABEL="${CODEX_RELAY_WATCHDOG_LABEL:-com.codexrelay.watchdog.bootstrap}
 KEEP_AWAKE_LABEL="${CODEX_RELAY_KEEP_AWAKE_LABEL:-com.codexrelay.keepawake.bootstrap}"
 RELAY_SERVER_LABEL="${CODEX_RELAY_RELAY_SERVER_LABEL:-com.codexrelay.relayserver.bootstrap}"
 RELAY_CONNECTOR_LABEL="${CODEX_RELAY_RELAY_CONNECTOR_LABEL:-com.codexrelay.relayconnector.bootstrap}"
+QUIC_GATEWAY_LABEL="${CODEX_RELAY_QUIC_GATEWAY_LABEL:-com.dexrelay.quicgateway.bootstrap}"
 BRIDGE_PLIST="${CODEX_RELAY_BRIDGE_PLIST:-$HOME/Library/LaunchAgents/${BRIDGE_LABEL}.plist}"
 HELPER_PLIST="${CODEX_RELAY_HELPER_PLIST:-$HOME/Library/LaunchAgents/${HELPER_LABEL}.plist}"
 WATCHDOG_PLIST="${CODEX_RELAY_WATCHDOG_PLIST:-$HOME/Library/LaunchAgents/${WATCHDOG_LABEL}.plist}"
 KEEP_AWAKE_PLIST="${CODEX_RELAY_KEEP_AWAKE_PLIST:-$HOME/Library/LaunchAgents/${KEEP_AWAKE_LABEL}.plist}"
 RELAY_SERVER_PLIST="${CODEX_RELAY_RELAY_SERVER_PLIST:-$HOME/Library/LaunchAgents/${RELAY_SERVER_LABEL}.plist}"
 RELAY_CONNECTOR_PLIST="${CODEX_RELAY_RELAY_CONNECTOR_PLIST:-$HOME/Library/LaunchAgents/${RELAY_CONNECTOR_LABEL}.plist}"
+QUIC_GATEWAY_PLIST="${CODEX_RELAY_QUIC_GATEWAY_PLIST:-$HOME/Library/LaunchAgents/${QUIC_GATEWAY_LABEL}.plist}"
 HELPER_URL="http://127.0.0.1:${HELPER_PORT}/api/helper/status"
 HELPER_STATE_DIR="${CODEX_RELAY_HELPER_STATE_DIR:-$HOME/Library/Application Support/CodexRelayHelper}"
 BRIDGE_LOG_DIR="${CODEX_RELAY_BRIDGE_LOG_DIR:-$HOME/Library/Logs/CodexRelayBootstrap}"
@@ -229,10 +232,12 @@ runtime_snapshot() {
   watchdog_agent="not loaded"
   relay_server_agent="not loaded"
   relay_connector_agent="not loaded"
+  quic_gateway_agent="not loaded"
   keep_awake_state="disabled"
   bridge_socket="closed"
   helper_socket="closed"
   relay_server_socket="closed"
+  quic_gateway_socket="closed"
   helper_json=""
   helper_version=""
   helper_setup_state=""
@@ -246,10 +251,12 @@ runtime_snapshot() {
   launch_agent_loaded "$WATCHDOG_LABEL" && watchdog_agent="loaded"
   launch_agent_loaded "$RELAY_SERVER_LABEL" && relay_server_agent="loaded"
   launch_agent_loaded "$RELAY_CONNECTOR_LABEL" && relay_connector_agent="loaded"
+  launch_agent_loaded "$QUIC_GATEWAY_LABEL" && quic_gateway_agent="loaded"
   keep_awake_enabled && keep_awake_state="loaded"
   port_listening "$BRIDGE_PORT" && bridge_socket="listening"
   port_listening "$HELPER_PORT" && helper_socket="listening"
   port_listening "$RELAY_SERVER_PORT" && relay_server_socket="listening"
+  lsof -nP -iUDP:"$QUIC_GATEWAY_PORT" >/dev/null 2>&1 && quic_gateway_socket="listening"
 
   helper_json="$(helper_status_json)"
   if [[ -n "$helper_json" ]]; then
@@ -549,10 +556,12 @@ PY
   print_status_line "watchdog agent" "$watchdog_agent"
   print_status_line "relay server agent" "$relay_server_agent"
   print_status_line "relay connector agent" "$relay_connector_agent"
+  print_status_line "quic gateway agent" "$quic_gateway_agent"
   print_status_line "keep awake" "$keep_awake_state"
   print_status_line "bridge socket" "$bridge_socket"
   print_status_line "helper socket" "$helper_socket"
   print_status_line "relay server socket" "$relay_server_socket"
+  print_status_line "quic gateway udp" "$quic_gateway_socket"
   print_status_line "tailscale cli" "$tailscale_cli"
   print_status_line "tailscale" "$tailscale_state"
   print_status_line "tailscale serve" "$tailscale_serve"
@@ -625,6 +634,12 @@ repair_command() {
     printf 'Restarted %s\n' "$RELAY_SERVER_LABEL"
   else
     printf 'Could not restart %s from %s\n' "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST"
+  fi
+
+  if restart_launch_agent "$QUIC_GATEWAY_LABEL" "$QUIC_GATEWAY_PLIST"; then
+    printf 'Restarted %s\n' "$QUIC_GATEWAY_LABEL"
+  else
+    printf 'Could not restart %s from %s\n' "$QUIC_GATEWAY_LABEL" "$QUIC_GATEWAY_PLIST"
   fi
 
   if [[ -f "$RELAY_STATE_DIR/connector.env" ]]; then
@@ -832,10 +847,11 @@ uninstall_command() {
   bootout_launch_agent "$WATCHDOG_LABEL"
   bootout_launch_agent "$RELAY_SERVER_LABEL"
   bootout_launch_agent "$RELAY_CONNECTOR_LABEL"
+  bootout_launch_agent "$QUIC_GATEWAY_LABEL"
   bootout_launch_agent "$KEEP_AWAKE_LABEL"
 
   printf 'Removing launch agents.\n'
-  rm -f "$BRIDGE_PLIST" "$HELPER_PLIST" "$WATCHDOG_PLIST" "$RELAY_SERVER_PLIST" "$RELAY_CONNECTOR_PLIST" "$KEEP_AWAKE_PLIST"
+  rm -f "$BRIDGE_PLIST" "$HELPER_PLIST" "$WATCHDOG_PLIST" "$RELAY_SERVER_PLIST" "$RELAY_CONNECTOR_PLIST" "$QUIC_GATEWAY_PLIST" "$KEEP_AWAKE_PLIST"
 
   printf 'Removing runtime data.\n'
   rm -rf "$RUNTIME_ROOT" "$HELPER_STATE_DIR" "$BRIDGE_LOG_DIR" "$HELPER_LOG_DIR" "$RELAY_STATE_DIR"

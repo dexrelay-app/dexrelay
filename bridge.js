@@ -20,6 +20,7 @@ const MAX_MESSAGE_BYTES = Number(process.env.MAX_MESSAGE_BYTES || 900000);
 const LOCAL_EXEC_OUTPUT_LIMIT = Number(process.env.LOCAL_EXEC_OUTPUT_LIMIT || 120000);
 const LOCAL_READ_FILE_MAX_BYTES = Number(process.env.LOCAL_READ_FILE_MAX_BYTES || 25 * 1024 * 1024);
 const LOCAL_UPLOAD_DIR = process.env.LOCAL_UPLOAD_DIR || path.join(os.tmpdir(), 'codex-remote-uploads');
+const LOCAL_UPLOAD_CACHE_LIMIT = Number(process.env.LOCAL_UPLOAD_CACHE_LIMIT || 128);
 const SESSION_HISTORY_CACHE_LIMIT = Number(process.env.SESSION_HISTORY_CACHE_LIMIT || 12);
 const DETACHED_SESSION_MAX_MS = Number(process.env.DETACHED_SESSION_MAX_MS || 10 * 60 * 1000);
 const DETACHED_IDLE_SHUTDOWN_MS = Number(process.env.DETACHED_IDLE_SHUTDOWN_MS || 15 * 1000);
@@ -30,6 +31,7 @@ const CLAUDE_JOB_DIR = process.env.CLAUDE_JOB_DIR
   || path.join(os.homedir(), 'Library/Application Support/DexRelay/runtime/claude-jobs');
 const CLAUDE_STALE_JOB_GRACE_MS = Number(process.env.CLAUDE_STALE_JOB_GRACE_MS || 10 * 1000);
 const sessionHistoryCache = new Map();
+const uploadedMediaCache = new Map();
 const activeClaudeJobIDs = new Set();
 const claudeJobWaiters = new Map();
 
@@ -49,11 +51,46 @@ function sanitizeFileName(name = 'attachment') {
     .slice(0, 120) || 'attachment';
 }
 
+function uploadedMediaCacheKey(params = {}, size = null) {
+  const raw =
+    typeof params.uploadId === 'string' && params.uploadId.trim()
+      ? params.uploadId.trim()
+      : typeof params.dedupeKey === 'string' && params.dedupeKey.trim()
+        ? params.dedupeKey.trim()
+        : '';
+  if (!raw) return null;
+  const fileName = sanitizeFileName(params.filename || 'attachment');
+  const mimeType = typeof params.mimeType === 'string' ? params.mimeType : '';
+  return `${raw}:${fileName}:${mimeType}:${size ?? 'unknown'}`;
+}
+
+function rememberUploadedMedia(key, response) {
+  if (!key || !response?.result?.path) return;
+  uploadedMediaCache.set(key, response);
+  while (uploadedMediaCache.size > LOCAL_UPLOAD_CACHE_LIMIT) {
+    const oldest = uploadedMediaCache.keys().next().value;
+    if (!oldest) break;
+    uploadedMediaCache.delete(oldest);
+  }
+}
+
 function writeUploadedMedia(params = {}) {
   const fileName = sanitizeFileName(params.filename || 'attachment');
   const base64 = typeof params.dataBase64 === 'string' ? params.dataBase64 : '';
   if (!base64) {
     return { error: { code: -32602, message: 'local/uploadMedia requires dataBase64' } };
+  }
+
+  const size = Buffer.byteLength(base64, 'base64');
+  const cacheKey = uploadedMediaCacheKey(params, size);
+  const cached = cacheKey ? uploadedMediaCache.get(cacheKey) : null;
+  if (cached?.result?.path && existsSync(cached.result.path)) {
+    return {
+      result: {
+        ...cached.result,
+        duplicate: true,
+      },
+    };
   }
 
   mkdirSync(LOCAL_UPLOAD_DIR, { recursive: true });
@@ -62,14 +99,16 @@ function writeUploadedMedia(params = {}) {
 
   try {
     writeFileSync(outPath, Buffer.from(base64, 'base64'));
-    return {
+    const response = {
       result: {
         path: outPath,
         filename: fileName,
         mimeType: typeof params.mimeType === 'string' ? params.mimeType : '',
-        size: Buffer.byteLength(base64, 'base64'),
+        size,
       },
     };
+    rememberUploadedMedia(cacheKey, response);
+    return response;
   } catch (error) {
     return { error: { code: -32603, message: `Failed to write upload: ${error.message}` } };
   }
@@ -1579,11 +1618,31 @@ function serializeForMobile(payload) {
         }
       : moreAggressive.params;
 
-    return JSON.stringify({
+    const compactText = JSON.stringify({
       method: moreAggressive.method,
       id: moreAggressive.id,
       result: compactResult,
       params: compactParams,
+    });
+    if (Buffer.byteLength(compactText, 'utf8') <= MAX_MESSAGE_BYTES) {
+      return compactText;
+    }
+    if (Number.isInteger(moreAggressive.id)) {
+      return JSON.stringify({
+        id: moreAggressive.id,
+        error: {
+          code: -32001,
+          message: 'Response too large for mobile relay; use paged session history.',
+          data: { mobilePayloadTooLarge: true },
+        },
+      });
+    }
+    return JSON.stringify({
+      method: 'local/mobilePayloadDropped',
+      params: {
+        originalMethod: moreAggressive.method,
+        reason: 'payload too large for mobile relay',
+      },
     });
   }
 
@@ -1824,12 +1883,28 @@ function createBridgeSession() {
     }
   };
 
-  const attachClient = (client, cid, replayRecent = true) => {
-    if (
-      session.attachedClient &&
-      session.attachedClient !== client
-    ) {
-      try { session.attachedClient.close(); } catch (_) {}
+  const attachedClientIsOpen = () =>
+    session.attachedClient &&
+    (session.attachedClient.readyState === WebSocket.OPEN ||
+      session.attachedClient.readyState === WebSocket.CONNECTING);
+
+  const canAttachClient = (client, takeover = false) => {
+    if (!attachedClientIsOpen() || session.attachedClient === client) {
+      return { ok: true };
+    }
+    if (takeover) {
+      return { ok: true, takeover: true };
+    }
+    return { ok: false, reason: 'session_owned_by_another_client' };
+  };
+
+  const attachClient = (client, cid, replayRecent = true, options = {}) => {
+    const decision = canAttachClient(client, options.takeover === true);
+    if (!decision.ok) {
+      return false;
+    }
+    if (decision.takeover && session.attachedClient && session.attachedClient !== client) {
+      try { session.attachedClient.close(1012, 'session takeover'); } catch (_) {}
     }
     session.attachedClient = client;
     session.attachedClientID = cid;
@@ -1969,6 +2044,7 @@ function createBridgeSession() {
     upstream.on('error', (err) => close(`upstream process error: ${err.message}`));
   }
 
+  session.canAttachClient = canAttachClient;
   session.attachClient = attachClient;
   session.handleClientMessage = handleClientMessage;
   session.handleClientDisconnect = (client, reason) => {
@@ -2004,6 +2080,10 @@ function listLiveSessions() {
       detached: session.detachedHeadless,
       lastEventAt: session.lastEventAt,
       createdAt: session.createdAt,
+      attached: Boolean(
+        session.attachedClient &&
+        session.attachedClient.readyState === WebSocket.OPEN
+      ),
     }));
 }
 
@@ -2044,10 +2124,35 @@ server.on('connection', (client, req) => {
       if (!session) {
         return { result: { attached: false, sessions: listLiveSessions() } };
       }
+      const takeover = params.takeover === true || params.force === true;
+      const attachDecision =
+        typeof session.canAttachClient === 'function'
+          ? session.canAttachClient(client, takeover)
+          : { ok: true };
+      if (!attachDecision.ok) {
+        return {
+          result: {
+            attached: false,
+            reason: attachDecision.reason,
+            sessionId: session.id,
+            sessions: listLiveSessions(),
+          },
+        };
+      }
       if (currentSession && currentSession !== session) {
         currentSession.handleClientDisconnect(client, 'client switched live session');
       }
-      session.attachClient(client, cid, true);
+      const attached = session.attachClient(client, cid, true, { takeover });
+      if (!attached) {
+        return {
+          result: {
+            attached: false,
+            reason: 'session_attach_rejected',
+            sessionId: session.id,
+            sessions: listLiveSessions(),
+          },
+        };
+      }
       currentSession = session;
       return {
         result: {
