@@ -597,6 +597,7 @@ cat >"$RELEASE_PUBLIC_DIR/index.html" <<EOF
 <body>
   <h1>$TITLE</h1>
   <p>Archived build: $TIMESTAMP</p>
+  <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="itms-services://?action=download-manifest&url=$RELEASE_MANIFEST_URL">Install this build</a></p>
   <p>Manifest: <code>$RELEASE_MANIFEST_URL</code></p>
   <p>IPA: <code>$RELEASE_APP_URL</code></p>
@@ -620,6 +621,7 @@ cat >"$PUBLIC_LATEST_ROOT/index.html" <<EOF
 <body>
   <h1>$TITLE</h1>
   <p>Latest good build alias.</p>
+  <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
   <p>Manifest: <code>$MANIFEST_URL</code></p>
   <p>IPA: <code>$APP_URL</code></p>
@@ -648,7 +650,7 @@ cat >"$PUBLIC_PROJECT_ROOT/index.html" <<EOF
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p>Open this page in Safari on the target iPhone, then tap install.</p>
+  <p>Open this page in Safari on the target iPhone, then tap install. This is not public app distribution: the IPA was built and signed on the developer's Mac, and iOS only installs it on devices included in the Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
   <p>Latest manifest: <code>$MANIFEST_URL</code></p>
   <p>Latest IPA: <code>$APP_URL</code></p>

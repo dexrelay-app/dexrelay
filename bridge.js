@@ -405,7 +405,7 @@ function readSessionHistoryPage(params = {}) {
 
   const end = beforeCursor == null ? messages.length : Math.min(beforeCursor, messages.length);
   const start = Math.max(0, end - limit);
-  const pageMessages = messages.slice(start, end);
+  const pageMessages = fitSessionHistoryPageForMobile(messages.slice(start, end));
 
   return {
     result: {
@@ -416,6 +416,56 @@ function readSessionHistoryPage(params = {}) {
       totalCount: messages.length,
     },
   };
+}
+
+function sanitizeSessionHistoryAttachment(attachment) {
+  if (!attachment || typeof attachment !== 'object') return null;
+  const remoteURL = typeof attachment.remoteURL === 'string' ? attachment.remoteURL.trim() : '';
+  const safeRemoteURL =
+    remoteURL &&
+    !remoteURL.startsWith('data:') &&
+    Buffer.byteLength(remoteURL, 'utf8') <= 8192
+      ? remoteURL
+      : null;
+  return {
+    id: attachment.id,
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    kind: attachment.kind,
+    ...(typeof attachment.localPath === 'string' ? { localPath: attachment.localPath } : {}),
+    ...(safeRemoteURL ? { remoteURL: safeRemoteURL } : {}),
+    ...(remoteURL && !safeRemoteURL ? { remoteOmitted: true } : {}),
+  };
+}
+
+function sanitizeSessionHistoryMessage(message, textLimit = ITEM_TEXT_MAX_CHARS) {
+  if (!message || typeof message !== 'object') return null;
+  return {
+    id: message.id,
+    role: message.role,
+    text: typeof message.text === 'string' ? truncateText(message.text, textLimit) : '',
+    createdAt: message.createdAt,
+    sortIndex: message.sortIndex,
+    attachments: Array.isArray(message.attachments)
+      ? message.attachments.map(sanitizeSessionHistoryAttachment).filter(Boolean).slice(0, 8)
+      : [],
+  };
+}
+
+function fitSessionHistoryPageForMobile(messages) {
+  let page = messages.map((message) => sanitizeSessionHistoryMessage(message)).filter(Boolean);
+  let text = JSON.stringify({ messages: page });
+  while (page.length > 1 && Buffer.byteLength(text, 'utf8') > MAX_MESSAGE_BYTES) {
+    page = page.slice(1);
+    text = JSON.stringify({ messages: page });
+  }
+  if (Buffer.byteLength(text, 'utf8') <= MAX_MESSAGE_BYTES) {
+    return page;
+  }
+  return page
+    .map((message) => sanitizeSessionHistoryMessage(message, 1000))
+    .filter(Boolean)
+    .slice(-1);
 }
 
 function claudeProjectKeyForPath(cwd) {
@@ -1217,10 +1267,51 @@ function truncateText(value, maxChars = ITEM_TEXT_MAX_CHARS) {
   return `${value.slice(0, maxChars)}\n\n[truncated for mobile]`;
 }
 
+function diffLineCounts(diff) {
+  if (typeof diff !== 'string' || diff.length === 0) {
+    return {};
+  }
+
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) additions += 1;
+    if (line.startsWith('-')) deletions += 1;
+  }
+  return { additions, deletions };
+}
+
+function sanitizeFileChanges(changes) {
+  if (!Array.isArray(changes)) return [];
+  return changes.map((change) => {
+    if (!change || typeof change !== 'object') return null;
+    const counts = diffLineCounts(change.diff);
+    return {
+      path: change.path,
+      kind: change.kind,
+      additions: change.additions ?? change.addedLines ?? change.insertions ?? change.linesAdded ?? counts.additions,
+      deletions: change.deletions ?? change.removedLines ?? change.linesRemoved ?? change.linesDeleted ?? counts.deletions,
+    };
+  }).filter(Boolean);
+}
+
 function sanitizeItem(item) {
   if (!item || typeof item !== 'object') return null;
   const type = item.type;
-  if (!['userMessage', 'agentMessage', 'plan', 'reasoning'].includes(type)) {
+  if (![
+    'userMessage',
+    'agentMessage',
+    'plan',
+    'reasoning',
+    'commandExecution',
+    'fileChange',
+    'mcpToolCall',
+    'webSearch',
+    'contextCompaction',
+    'enteredReviewMode',
+    'exitedReviewMode',
+  ].includes(type)) {
     return null;
   }
 
@@ -1257,6 +1348,64 @@ function sanitizeItem(item) {
       createdAt: item.createdAt,
       summary: typeof item.summary === 'string' ? truncateText(item.summary) : undefined,
       content: typeof item.content === 'string' ? truncateText(item.content) : undefined,
+    };
+  }
+
+  if (type === 'commandExecution') {
+    return {
+      id: item.id,
+      type,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
+      command: truncateText(item.command, 800),
+      cwd: item.cwd,
+      exitCode: item.exitCode,
+      durationMs: item.durationMs,
+    };
+  }
+
+  if (type === 'fileChange') {
+    return {
+      id: item.id,
+      type,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
+      changes: sanitizeFileChanges(item.changes),
+    };
+  }
+
+  if (type === 'mcpToolCall') {
+    return {
+      id: item.id,
+      type,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
+      server: item.server,
+      tool: item.tool,
+    };
+  }
+
+  if (type === 'webSearch') {
+    return {
+      id: item.id,
+      type,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
+      query: truncateText(item.query, 400),
+    };
+  }
+
+  if (['contextCompaction', 'enteredReviewMode', 'exitedReviewMode'].includes(type)) {
+    return {
+      id: item.id,
+      type,
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
     };
   }
 
