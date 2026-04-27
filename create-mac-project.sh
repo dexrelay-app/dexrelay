@@ -10,6 +10,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GIT_AUTOMATION_SCRIPT="$SCRIPT_DIR/git-project-automation.sh"
 GOVERNANCECTL_SCRIPT="$SCRIPT_DIR/governancectl.py"
 
+run_governance_update() {
+  local target_project_path="$1"
+  local target_project_name="$2"
+  local governance_output=""
+
+  [[ -f "$GOVERNANCECTL_SCRIPT" ]] || return 0
+
+  if ! governance_output="$(python3 "$GOVERNANCECTL_SCRIPT" update-project --project-path "$target_project_path" --project-name "$target_project_name" 2>&1 >/dev/null)"; then
+    if printf '%s' "$governance_output" | grep -qi "Operation not permitted"; then
+      echo "warning: macOS blocked DexRelay project metadata writes. The project was created; choose a writable workspace like ~/src or grant Terminal/DexRelay file access, then run dexrelay repair." >&2
+    else
+      echo "warning: DexRelay project metadata setup failed. The project was created; run dexrelay repair if it does not appear correctly." >&2
+    fi
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-dir)
@@ -96,9 +112,7 @@ if [[ "$PROJECT_KIND" == "folder" ]]; then
 
 Created from Codex iPhone to Mac Relay.
 TXT
-  if [[ -f "$GOVERNANCECTL_SCRIPT" ]]; then
-    python3 "$GOVERNANCECTL_SCRIPT" update-project --project-path "$project_root" --project-name "$trimmed_name" >/dev/null
-  fi
+  run_governance_update "$project_root" "$trimmed_name"
   git_info="$("$GIT_AUTOMATION_SCRIPT" --mode ensure --cwd "$project_root")"
   python3 - <<PY "$project_root" "$PROJECT_KIND" "$git_info"
 import json, sys
@@ -677,9 +691,7 @@ npm run lint
 - \`npm run dev\` binds to \`0.0.0.0\` so DexRelay can expose the local dev server when needed.
 TXT
 
-  if [[ -f "$GOVERNANCECTL_SCRIPT" ]]; then
-    python3 "$GOVERNANCECTL_SCRIPT" update-project --project-path "$project_root" --project-name "$trimmed_name" >/dev/null
-  fi
+  run_governance_update "$project_root" "$trimmed_name"
   git_info="$("$GIT_AUTOMATION_SCRIPT" --mode ensure --cwd "$project_root")"
   python3 - <<PY "$project_root" "$PROJECT_KIND" "$git_info"
 import json, sys
@@ -1296,9 +1308,7 @@ Bundle ID: $project_bundle_id
 TXT
 
 git_info="$("$GIT_AUTOMATION_SCRIPT" --mode ensure --cwd "$project_root")"
-if [[ -f "$GOVERNANCECTL_SCRIPT" ]]; then
-  python3 "$GOVERNANCECTL_SCRIPT" update-project --project-path "$project_root" --project-name "$trimmed_name" >/dev/null
-fi
+run_governance_update "$project_root" "$trimmed_name"
 
 python3 - <<PY "$project_root" "$PROJECT_KIND" "$project_file" "$safe_token" "$git_info"
 import json, sys
