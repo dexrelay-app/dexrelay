@@ -93,7 +93,7 @@ def shell_quote(value: str) -> str:
 
 def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
     if not path.exists():
-        return {"version": 1, "portPolicy": {"min": 8000, "max": 8999, "reserved": [4500, 4600, 4610, 4615, 4616]}, "services": []}
+        return {"version": 1, "portPolicy": {"min": 8000, "max": 8999, "reserved": [4500, 4610, 4615, 4616]}, "services": []}
     data = load_json(path)
     if not isinstance(data, dict):
         raise ValueError(f"invalid registry root: {path}")

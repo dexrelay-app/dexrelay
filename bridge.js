@@ -6,7 +6,7 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const LISTEN_HOST = process.env.BRIDGE_HOST || '0.0.0.0';
-const LISTEN_PORT = Number(process.env.BRIDGE_PORT || 4600);
+const LISTEN_PORT = Number(process.env.BRIDGE_PORT || 4615);
 const UPSTREAM_TRANSPORT = (process.env.UPSTREAM_TRANSPORT || 'stdio').toLowerCase();
 const UPSTREAM_URL = process.env.UPSTREAM_URL || 'ws://127.0.0.1:4500';
 const CODEX_BIN = process.env.CODEX_BIN || '/opt/homebrew/bin/codex';
@@ -335,6 +335,25 @@ function extractSessionAttachments(content) {
   return attachments;
 }
 
+function isClaudeToolNoiseMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  const content = message.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((part) => {
+    if (!part || typeof part !== 'object') return false;
+    return part.type === 'tool_use' || part.type === 'tool_result';
+  });
+}
+
+function isClaudeToolResultRecord(record) {
+  if (!record || typeof record !== 'object') return false;
+  const role = record.message?.role || record.type;
+  if (role !== 'user') return isClaudeToolNoiseMessage(record.message);
+  if (isClaudeToolNoiseMessage(record.message)) return true;
+  if (record.toolUseResult && typeof record.toolUseResult === 'object') return true;
+  return typeof record.sourceToolAssistantUUID === 'string' && record.sourceToolAssistantUUID.trim();
+}
+
 function parseSessionMessages(fileText) {
   const messages = [];
   const lines = fileText.split('\n');
@@ -377,6 +396,7 @@ function parseSessionMessages(fileText) {
 
     const claudeRole = record.message?.role || record.type;
     if (!['user', 'assistant'].includes(claudeRole)) continue;
+    if (isClaudeToolResultRecord(record)) continue;
     const claudeText = claudeTextFromMessage(record.message);
     if (!claudeText) continue;
 
@@ -528,6 +548,7 @@ function claudeTextFromMessage(message) {
     return content
       .map((part) => {
         if (typeof part === 'string') return part;
+        if (part?.type === 'tool_use' || part?.type === 'tool_result') return '';
         if (typeof part?.text === 'string') return part.text;
         if (typeof part?.content === 'string') return part.content;
         return '';
@@ -545,7 +566,120 @@ function clipClaudeSummaryText(value, limit = 280) {
   return `${text.slice(0, limit - 3).trim()}...`;
 }
 
-function summarizeClaudeProgressEvent(parsed) {
+function fileBasename(value) {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  return path.basename(value.trim()) || value.trim();
+}
+
+function humanizeClaudeToolName(name) {
+  const normalized = typeof name === 'string' ? name.trim() : '';
+  switch (normalized) {
+    case 'Bash':
+      return 'command';
+    case 'Read':
+      return 'file read';
+    case 'Write':
+      return 'file write';
+    case 'Edit':
+    case 'MultiEdit':
+      return 'file edit';
+    case 'Grep':
+      return 'search';
+    case 'Glob':
+      return 'file search';
+    case 'LS':
+      return 'directory listing';
+    case 'TodoWrite':
+      return 'plan update';
+    case 'WebFetch':
+      return 'web fetch';
+    case 'WebSearch':
+      return 'web search';
+    default:
+      return normalized ? normalized.replace(/_/g, ' ') : 'tool';
+  }
+}
+
+function summarizeBashActivity(input = {}) {
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  if (description) return description;
+
+  const command = typeof input.command === 'string' ? input.command.replace(/\s+/g, ' ').trim() : '';
+  if (!command) return 'Running command';
+
+  const lower = command.toLowerCase();
+  if (/\b(git status|git diff|git log|git show)\b/.test(lower)) return 'Checking git state';
+  if (/\b(xcodebuild|swift test|npm test|pnpm test|yarn test|pytest|vitest|jest)\b/.test(lower)) return 'Running tests';
+  if (/\b(rg|grep|find)\b/.test(lower)) return 'Searching files';
+  if (/\b(ls|tree)\b/.test(lower)) return 'Listing files';
+  if (/\b(cat|sed|tail|head)\b/.test(lower)) return 'Reading command output';
+  if (/\b(npm install|pnpm install|yarn install|bundle install|pod install)\b/.test(lower)) return 'Installing dependencies';
+  if (/\b(git apply|apply_patch)\b/.test(lower)) return 'Applying changes';
+  return `Running command: ${clipClaudeSummaryText(command, 90)}`;
+}
+
+function rememberClaudeToolUse(job, toolUse) {
+  if (!job || !toolUse || typeof toolUse !== 'object') return;
+  const id = typeof toolUse.id === 'string' ? toolUse.id.trim() : '';
+  if (!id) return;
+  const tools = job.claudeToolsByID && typeof job.claudeToolsByID === 'object' ? job.claudeToolsByID : {};
+  tools[id] = {
+    name: typeof toolUse.name === 'string' ? toolUse.name : '',
+    input: toolUse.input && typeof toolUse.input === 'object' ? toolUse.input : {},
+  };
+  job.claudeToolsByID = Object.fromEntries(Object.entries(tools).slice(-80));
+}
+
+function summarizeClaudeToolUse(toolUse, job) {
+  if (!toolUse || typeof toolUse !== 'object') return '';
+  rememberClaudeToolUse(job, toolUse);
+  const name = typeof toolUse.name === 'string' ? toolUse.name.trim() : '';
+  const input = toolUse.input && typeof toolUse.input === 'object' ? toolUse.input : {};
+
+  switch (name) {
+    case 'Bash':
+      return summarizeBashActivity(input);
+    case 'Read':
+      return `Reading ${fileBasename(input.file_path) || 'file'}`;
+    case 'Write':
+      return `Writing ${fileBasename(input.file_path) || 'file'}`;
+    case 'Edit':
+    case 'MultiEdit':
+      return `Editing ${fileBasename(input.file_path) || 'file'}`;
+    case 'Grep':
+      return `Searching ${input.pattern ? `for ${clipClaudeSummaryText(input.pattern, 60)}` : 'files'}`;
+    case 'Glob':
+      return `Finding ${input.pattern ? clipClaudeSummaryText(input.pattern, 70) : 'matching files'}`;
+    case 'LS':
+      return `Listing ${fileBasename(input.path) || 'directory'}`;
+    case 'TodoWrite':
+      return 'Updating plan';
+    case 'WebFetch':
+      return 'Reading web page';
+    case 'WebSearch':
+      return 'Searching web';
+    default:
+      return `Using ${humanizeClaudeToolName(name)}`;
+  }
+}
+
+function summarizeClaudeToolResult(toolResult, job) {
+  if (!toolResult || typeof toolResult !== 'object') return '';
+  const toolUseID = typeof toolResult.tool_use_id === 'string' ? toolResult.tool_use_id.trim() : '';
+  const toolInfo = toolUseID && job?.claudeToolsByID ? job.claudeToolsByID[toolUseID] : null;
+  const toolName = toolInfo?.name || '';
+  const label = humanizeClaudeToolName(toolName);
+  const isError = toolResult.is_error === true;
+  const content = typeof toolResult.content === 'string' ? toolResult.content.trim() : '';
+
+  if (isError) return `${label[0]?.toUpperCase() || 'T'}${label.slice(1)} reported an error`;
+  if (!content || content === '(Bash completed with no output)') {
+    return `${label[0]?.toUpperCase() || 'T'}${label.slice(1)} completed with no output`;
+  }
+  return `${label[0]?.toUpperCase() || 'T'}${label.slice(1)} completed`;
+}
+
+function summarizeClaudeProgressEvent(parsed, job = null) {
   if (!parsed || typeof parsed !== 'object') return '';
 
   if (parsed.type === 'system') {
@@ -562,7 +696,11 @@ function summarizeClaudeProgressEvent(parsed) {
   if (Array.isArray(content)) {
     const toolUse = content.find((part) => part && typeof part === 'object' && part.type === 'tool_use');
     if (toolUse) {
-      return `Claude is using ${toolUse.name || 'a tool'}`;
+      return summarizeClaudeToolUse(toolUse, job);
+    }
+    const toolResult = content.find((part) => part && typeof part === 'object' && part.type === 'tool_result');
+    if (toolResult) {
+      return summarizeClaudeToolResult(toolResult, job);
     }
     const hasText = content.some((part) => typeof part?.text === 'string' && part.text.trim());
     if (hasText) return 'Claude is writing';
@@ -575,7 +713,7 @@ function summarizeClaudeProgressEvent(parsed) {
         return 'Claude started responding';
       case 'content_block_start': {
         const block = event.content_block || {};
-        if (block.type === 'tool_use') return `Claude is using ${block.name || 'a tool'}`;
+        if (block.type === 'tool_use') return summarizeClaudeToolUse(block, job);
         if (block.type === 'text') return 'Claude is writing';
         if (block.type === 'thinking') return 'Claude is thinking';
         return '';
@@ -651,6 +789,7 @@ function summarizeClaudeSessionFile(filePath, stats, fallbackSessionId) {
       if (Number.isFinite(time)) updatedAtMs = Math.max(updatedAtMs, time);
     }
 
+    if (isClaudeToolResultRecord(parsed)) continue;
     const role = parsed.message?.role || parsed.type;
     const text = claudeTextFromMessage(parsed.message);
     if (!text) continue;
@@ -1034,6 +1173,7 @@ function runClaudeSend(params = {}) {
       stderr: '',
       error: '',
       events: [],
+      claudeToolsByID: {},
       pid: null,
     };
     writeClaudeJob(job);
@@ -1074,7 +1214,7 @@ function runClaudeSend(params = {}) {
     const handleClaudeStreamLine = (line) => {
       const parsed = parseClaudeJsonLine(line);
       if (!parsed || typeof parsed !== 'object') return;
-      appendClaudeProgressEvent(job, summarizeClaudeProgressEvent(parsed));
+      appendClaudeProgressEvent(job, summarizeClaudeProgressEvent(parsed, job));
       const directSessionId = parsed.session_id || parsed.sessionId || parsed.sessionID;
       if (typeof directSessionId === 'string' && directSessionId.trim()) {
         streamSessionId = directSessionId.trim();

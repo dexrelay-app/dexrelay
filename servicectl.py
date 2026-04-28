@@ -54,7 +54,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
     if not path.exists():
         return {
             "version": 1,
-            "portPolicy": {"min": 8000, "max": 8999, "reserved": [4500, 4600, 4610, 4615, 4616, 4620]},
+            "portPolicy": {"min": 8000, "max": 8999, "reserved": [4500, 4610, 4615, 4616, 4620]},
             "services": [],
         }
     data = json.loads(path.read_text(encoding="utf-8"))
