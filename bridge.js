@@ -908,8 +908,43 @@ function runClaudeModels() {
 
 function listClaudeSessions(params = {}) {
   const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
-  const projectDir = path.join(os.homedir(), '.claude', 'projects', claudeProjectKeyForPath(cwd));
   const limit = Math.max(1, Math.min(50, Number(params.limit) || 20));
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+
+  if (params.allProjects === true || params.allProjects === 'true') {
+    if (!existsSync(projectsRoot)) {
+      return { result: { sessions: [], projectsRoot } };
+    }
+
+    let entries = [];
+    try {
+      entries = readdirSync(projectsRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .flatMap((entry) => {
+          const projectDir = path.join(projectsRoot, entry.name);
+          return readdirSync(projectDir)
+            .filter((name) => name.endsWith('.jsonl'))
+            .map((name) => {
+              const filePath = path.join(projectDir, name);
+              const stats = statSync(filePath);
+              return {
+                ...summarizeClaudeSessionFile(filePath, stats, name.replace(/\.jsonl$/, '')),
+                projectDir,
+                projectKey: entry.name,
+              };
+            });
+        })
+        .filter((session) => typeof session.cwd === 'string' && session.cwd.trim())
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .slice(0, limit);
+    } catch (error) {
+      return { error: { code: -32603, message: `Could not list Claude sessions: ${error.message}` } };
+    }
+
+    return { result: { sessions: entries, projectsRoot } };
+  }
+
+  const projectDir = path.join(projectsRoot, claudeProjectKeyForPath(cwd));
   if (!existsSync(projectDir)) {
     return { result: { sessions: [], projectDir } };
   }
