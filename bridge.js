@@ -354,6 +354,34 @@ function isClaudeToolResultRecord(record) {
   return typeof record.sourceToolAssistantUUID === 'string' && record.sourceToolAssistantUUID.trim();
 }
 
+function isProposedPlanText(text) {
+  if (typeof text !== 'string') return false;
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return /<proposed[_\-\s]?plan>/i.test(normalized);
+}
+
+function stripProposedPlanTags(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/<\/?proposed[_\-\s]?plan>/gi, '').trim();
+}
+
+function pushSessionMessage(messages, message) {
+  if (!message || typeof message !== 'object') return;
+  const normalizedText = typeof message.text === 'string' ? message.text.trim() : '';
+  const previous = messages[messages.length - 1];
+  if (
+    previous &&
+    previous.role === message.role &&
+    (previous.presentation || '') === (message.presentation || '') &&
+    typeof previous.text === 'string' &&
+    previous.text.trim() === normalizedText
+  ) {
+    return;
+  }
+  messages.push(message);
+}
+
 function parseSessionMessages(fileText) {
   const messages = [];
   const lines = fileText.split('\n');
@@ -368,14 +396,42 @@ function parseSessionMessages(fileText) {
       continue;
     }
 
+    if (record?.type === 'event_msg') {
+      const payload = record.payload;
+      const item = payload?.item;
+      const itemType = typeof item?.type === 'string' ? item.type.toLowerCase() : '';
+      if (payload?.type === 'item_completed' && itemType === 'plan') {
+        const text = stripProposedPlanTags(item?.text || '');
+        if (!text) continue;
+        const itemID =
+          (typeof item.id === 'string' && item.id.trim()) ||
+          (typeof payload.item_id === 'string' && payload.item_id.trim()) ||
+          (typeof payload.turn_id === 'string' && `${payload.turn_id}-plan`) ||
+          `session-plan-${index}`;
+        pushSessionMessage(messages, {
+          id: itemID,
+          role: 'assistant',
+          text,
+          createdAt: sessionTimestampToEpochSeconds(record.timestamp),
+          sortIndex: messages.length,
+          presentation: 'planBubble',
+          type: 'plan',
+          attachments: [],
+        });
+      }
+      continue;
+    }
+
     if (record?.type === 'response_item') {
       const payload = record.payload;
       if (!payload || payload.type !== 'message') continue;
       const role = payload.role;
       if (!['user', 'assistant'].includes(role)) continue;
 
-      const text = extractSessionMessageText(payload.content, role);
+      const rawText = extractSessionMessageText(payload.content, role);
       const attachments = extractSessionAttachments(payload.content);
+      const isPlan = role === 'assistant' && isProposedPlanText(rawText);
+      const text = isPlan ? stripProposedPlanTags(rawText) : rawText;
       if (!text && attachments.length === 0) continue;
 
       const itemID =
@@ -383,12 +439,13 @@ function parseSessionMessages(fileText) {
         (typeof record.id === 'string' && record.id.trim()) ||
         `session-${index}`;
 
-      messages.push({
+      pushSessionMessage(messages, {
         id: itemID,
         role,
         text: text || '',
         createdAt: sessionTimestampToEpochSeconds(record.timestamp),
         sortIndex: messages.length,
+        ...(isPlan ? { presentation: 'planBubble', type: 'plan' } : {}),
         attachments,
       });
       continue;
@@ -406,7 +463,7 @@ function parseSessionMessages(fileText) {
       (typeof record.id === 'string' && record.id.trim()) ||
       `claude-session-${index}`;
 
-    messages.push({
+    pushSessionMessage(messages, {
       id: claudeItemID,
       role: claudeRole,
       text: claudeText,
@@ -505,6 +562,8 @@ function sanitizeSessionHistoryMessage(message, textLimit = ITEM_TEXT_MAX_CHARS)
     text: typeof message.text === 'string' ? truncateText(message.text, textLimit) : '',
     createdAt: message.createdAt,
     sortIndex: message.sortIndex,
+    ...(typeof message.presentation === 'string' ? { presentation: message.presentation } : {}),
+    ...(typeof message.type === 'string' ? { type: message.type } : {}),
     attachments: Array.isArray(message.attachments)
       ? message.attachments.map(sanitizeSessionHistoryAttachment).filter(Boolean).slice(0, 8)
       : [],
@@ -1506,6 +1565,7 @@ function sanitizeFileChanges(changes) {
       kind: change.kind,
       additions: change.additions ?? change.addedLines ?? change.insertions ?? change.linesAdded ?? counts.additions,
       deletions: change.deletions ?? change.removedLines ?? change.linesRemoved ?? change.linesDeleted ?? counts.deletions,
+      diff: typeof change.diff === 'string' ? truncateText(change.diff, 24_000) : undefined,
     };
   }).filter(Boolean);
 }
@@ -1513,6 +1573,21 @@ function sanitizeFileChanges(changes) {
 function sanitizeItem(item) {
   if (!item || typeof item !== 'object') return null;
   const type = item.type;
+  const normalizedType = typeof type === 'string' ? type.toLowerCase() : type;
+  const canonicalTypeByNormalized = {
+    usermessage: 'userMessage',
+    agentmessage: 'agentMessage',
+    plan: 'plan',
+    reasoning: 'reasoning',
+    commandexecution: 'commandExecution',
+    filechange: 'fileChange',
+    mcptoolcall: 'mcpToolCall',
+    websearch: 'webSearch',
+    contextcompaction: 'contextCompaction',
+    enteredreviewmode: 'enteredReviewMode',
+    exitedreviewmode: 'exitedReviewMode',
+  };
+  const canonicalType = canonicalTypeByNormalized[normalizedType] ?? type;
   if (![
     'userMessage',
     'agentMessage',
@@ -1525,11 +1600,11 @@ function sanitizeItem(item) {
     'contextCompaction',
     'enteredReviewMode',
     'exitedReviewMode',
-  ].includes(type)) {
+  ].includes(canonicalType)) {
     return null;
   }
 
-  if (type === 'userMessage' && Array.isArray(item.content)) {
+  if (canonicalType === 'userMessage' && Array.isArray(item.content)) {
     const content = item.content.map((part) => {
       if (!part || typeof part !== 'object') return part;
       if (typeof part.text === 'string') {
@@ -1549,26 +1624,26 @@ function sanitizeItem(item) {
     }).filter(Boolean);
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       content,
     };
   }
 
-  if (type === 'reasoning') {
+  if (canonicalType === 'reasoning') {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       summary: typeof item.summary === 'string' ? truncateText(item.summary) : undefined,
       content: typeof item.content === 'string' ? truncateText(item.content) : undefined,
     };
   }
 
-  if (type === 'commandExecution') {
+  if (canonicalType === 'commandExecution') {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       status: item.status,
@@ -1579,10 +1654,10 @@ function sanitizeItem(item) {
     };
   }
 
-  if (type === 'fileChange') {
+  if (canonicalType === 'fileChange') {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       status: item.status,
@@ -1590,10 +1665,10 @@ function sanitizeItem(item) {
     };
   }
 
-  if (type === 'mcpToolCall') {
+  if (canonicalType === 'mcpToolCall') {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       status: item.status,
@@ -1602,10 +1677,10 @@ function sanitizeItem(item) {
     };
   }
 
-  if (type === 'webSearch') {
+  if (canonicalType === 'webSearch') {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       status: item.status,
@@ -1613,10 +1688,10 @@ function sanitizeItem(item) {
     };
   }
 
-  if (['contextCompaction', 'enteredReviewMode', 'exitedReviewMode'].includes(type)) {
+  if (['contextCompaction', 'enteredReviewMode', 'exitedReviewMode'].includes(canonicalType)) {
     return {
       id: item.id,
-      type,
+      type: canonicalType,
       createdAt: item.createdAt,
       completedAt: item.completedAt,
       status: item.status,
@@ -1625,7 +1700,7 @@ function sanitizeItem(item) {
 
   return {
     id: item.id,
-    type,
+    type: canonicalType,
     createdAt: item.createdAt,
     text: typeof item.text === 'string' ? truncateText(item.text) : undefined,
   };
