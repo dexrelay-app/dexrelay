@@ -955,8 +955,8 @@ function runClaudeModels() {
           claudeBin: CLAUDE_BIN,
           models: supportsModelFlag
             ? [
-                { id: 'sonnet', displayName: 'Sonnet', model: 'sonnet' },
                 { id: 'opus', displayName: 'Opus', model: 'opus' },
+                { id: 'sonnet', displayName: 'Sonnet', model: 'sonnet' },
               ]
             : [],
         },
