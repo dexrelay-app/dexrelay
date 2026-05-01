@@ -1079,6 +1079,7 @@ function mobileClaudeJob(job) {
     stderr: trimCommandOutput(job.stderr || ''),
     error: typeof job.error === 'string' ? job.error : '',
     events: Array.isArray(job.events) ? job.events.slice(-40) : [],
+    attachments: Array.isArray(job.attachments) ? job.attachments : [],
   };
 }
 
@@ -1104,6 +1105,45 @@ function resolveClaudeJobWaiters(job) {
   for (const waiter of waiters) {
     waiter(claudeJobResult(job));
   }
+}
+
+function normalizeClaudeAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments)) return [];
+  return rawAttachments
+    .map((attachment) => {
+      if (!attachment || typeof attachment !== 'object') return null;
+      const attachmentPath = typeof attachment.path === 'string' ? attachment.path.trim() : '';
+      if (!attachmentPath || !path.isAbsolute(attachmentPath)) return null;
+      return {
+        path: attachmentPath,
+        filename: sanitizeFileName(attachment.filename || path.basename(attachmentPath)),
+        mimeType: typeof attachment.mimeType === 'string' ? attachment.mimeType.trim() : '',
+        kind: typeof attachment.kind === 'string' && attachment.kind.trim() ? attachment.kind.trim() : 'file',
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function claudeAttachmentPromptBlock(attachments) {
+  if (!attachments.length) return '';
+  const lines = attachments.map((attachment) => {
+    const details = [attachment.kind, attachment.mimeType].filter(Boolean).join(', ');
+    return `- ${attachment.filename}${details ? ` (${details})` : ''}: ${attachment.path}`;
+  });
+  return [
+    'DexRelay attachments available on this Mac:',
+    ...lines,
+    'Use these local paths directly when inspecting the attachments.',
+  ].join('\n');
+}
+
+function promptWithClaudeAttachments(prompt, attachments) {
+  const block = claudeAttachmentPromptBlock(attachments);
+  if (!block || prompt.includes('DexRelay attachments available on this Mac:')) {
+    return prompt;
+  }
+  return `${prompt.trim()}\n\n${block}`;
 }
 
 function waitForClaudeJob(jobID) {
@@ -1180,7 +1220,9 @@ function claudeJobStatus(params = {}) {
 
 function runClaudeSend(params = {}) {
   return new Promise((resolve) => {
-    const prompt = typeof params.prompt === 'string' ? params.prompt : '';
+    const rawPrompt = typeof params.prompt === 'string' ? params.prompt : '';
+    const attachments = normalizeClaudeAttachments(params.attachments);
+    const prompt = promptWithClaudeAttachments(rawPrompt, attachments);
     const cwd = typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : process.cwd();
     const sessionId = typeof params.sessionId === 'string' && params.sessionId.trim() ? params.sessionId.trim() : null;
     const threadId = typeof params.threadId === 'string' && params.threadId.trim() ? params.threadId.trim() : null;
@@ -1267,6 +1309,7 @@ function runClaudeSend(params = {}) {
       stderr: '',
       error: '',
       events: [],
+      attachments,
       claudeToolsByID: {},
       pid: null,
     };
