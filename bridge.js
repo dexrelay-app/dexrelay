@@ -1,5 +1,5 @@
 const { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('fs');
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const readline = require('readline');
 const os = require('os');
 const path = require('path');
@@ -10,6 +10,7 @@ const LISTEN_PORT = Number(process.env.BRIDGE_PORT || 4615);
 const UPSTREAM_TRANSPORT = (process.env.UPSTREAM_TRANSPORT || 'stdio').toLowerCase();
 const UPSTREAM_URL = process.env.UPSTREAM_URL || 'ws://127.0.0.1:4500';
 const CODEX_BIN = process.env.CODEX_BIN || '/opt/homebrew/bin/codex';
+const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const CLAUDE_BIN = process.env.CLAUDE_BIN
   || (existsSync(path.join(os.homedir(), '.local/bin/claude')) ? path.join(os.homedir(), '.local/bin/claude') : null)
   || (existsSync('/opt/homebrew/bin/claude') ? '/opt/homebrew/bin/claude' : 'claude');
@@ -19,6 +20,7 @@ const ITEM_TEXT_MAX_CHARS = Number(process.env.ITEM_TEXT_MAX_CHARS || 4000);
 const MAX_MESSAGE_BYTES = Number(process.env.MAX_MESSAGE_BYTES || 900000);
 const LOCAL_EXEC_OUTPUT_LIMIT = Number(process.env.LOCAL_EXEC_OUTPUT_LIMIT || 120000);
 const LOCAL_READ_FILE_MAX_BYTES = Number(process.env.LOCAL_READ_FILE_MAX_BYTES || 25 * 1024 * 1024);
+const IMAGE_PREVIEW_MAX_BASE64_BYTES = Number(process.env.IMAGE_PREVIEW_MAX_BASE64_BYTES || 520 * 1024);
 const LOCAL_UPLOAD_DIR = process.env.LOCAL_UPLOAD_DIR || path.join(os.tmpdir(), 'codex-remote-uploads');
 const LOCAL_UPLOAD_CACHE_LIMIT = Number(process.env.LOCAL_UPLOAD_CACHE_LIMIT || 128);
 const SESSION_HISTORY_CACHE_LIMIT = Number(process.env.SESSION_HISTORY_CACHE_LIMIT || 12);
@@ -49,6 +51,53 @@ function sanitizeFileName(name = 'attachment') {
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+/, '')
     .slice(0, 120) || 'attachment';
+}
+
+function imageMimeTypeForPath(filePath) {
+  const ext = path.extname(filePath || '').toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.heic') return 'image/heic';
+  return 'image/png';
+}
+
+function imagePreviewPayload(localPath) {
+  if (typeof localPath !== 'string' || !localPath.trim() || !existsSync(localPath)) return {};
+  try {
+    const stats = statSync(localPath);
+    if (!stats.isFile()) return {};
+    const original = readFileSync(localPath);
+    const originalBase64 = original.toString('base64');
+    if (Buffer.byteLength(originalBase64, 'utf8') <= IMAGE_PREVIEW_MAX_BASE64_BYTES) {
+      return {
+        dataBase64: originalBase64,
+        mimeType: imageMimeTypeForPath(localPath),
+      };
+    }
+
+    const outPath = path.join(os.tmpdir(), `dexrelay-image-preview-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`);
+    try {
+      execFileSync('/usr/bin/sips', ['-Z', '960', '-s', 'format', 'jpeg', '-s', 'formatOptions', '78', localPath, '--out', outPath], {
+        stdio: 'ignore',
+        timeout: 15_000,
+      });
+      const preview = readFileSync(outPath);
+      const previewBase64 = preview.toString('base64');
+      try { require('fs').unlinkSync(outPath); } catch (_) {}
+      if (Buffer.byteLength(previewBase64, 'utf8') <= IMAGE_PREVIEW_MAX_BASE64_BYTES) {
+        return {
+          dataBase64: previewBase64,
+          mimeType: 'image/jpeg',
+        };
+      }
+    } catch (_) {
+      try { require('fs').unlinkSync(outPath); } catch (_) {}
+    }
+  } catch (_) {
+    return {};
+  }
+  return {};
 }
 
 function uploadedMediaCacheKey(params = {}, size = null) {
@@ -286,23 +335,33 @@ function extractSessionAttachments(content) {
       continue;
     }
 
+    const localImagePath =
+      (typeof part.path === 'string' && part.path.trim()) ||
+      (typeof part.localPath === 'string' && part.localPath.trim()) ||
+      (typeof part.local_path === 'string' && part.local_path.trim()) ||
+      null;
     const remoteURL =
       (typeof part.url === 'string' && part.url.trim()) ||
       (typeof part.image_url === 'string' && part.image_url.trim()) ||
+      (typeof part.imageUrl === 'string' && part.imageUrl.trim()) ||
+      (typeof part.remoteURL === 'string' && part.remoteURL.trim()) ||
+      (typeof part.remote_url === 'string' && part.remote_url.trim()) ||
       null;
-    if (['image', 'input_image', 'output_image'].includes(part.type) && remoteURL) {
-      const isDataURL = remoteURL.startsWith('data:');
+    if (['image', 'input_image', 'output_image'].includes(part.type) && (localImagePath || remoteURL)) {
+      const isDataURL = typeof remoteURL === 'string' && remoteURL.startsWith('data:');
       attachments.push({
         id: attachmentID,
         filename:
           (typeof part.filename === 'string' && part.filename.trim()) ||
-          (!isDataURL ? path.basename(remoteURL) : '') ||
+          path.basename(localImagePath || '') ||
+          (remoteURL && !isDataURL ? path.basename(remoteURL) : '') ||
           'image',
         mimeType:
           (typeof part.mimeType === 'string' && part.mimeType.trim()) ||
           'image/*',
         kind: 'image',
-        remoteURL,
+        ...(localImagePath ? { localPath: localImagePath } : {}),
+        ...(remoteURL ? { remoteURL } : {}),
       });
       continue;
     }
@@ -382,8 +441,76 @@ function pushSessionMessage(messages, message) {
   messages.push(message);
 }
 
-function parseSessionMessages(fileText) {
+function sessionIDFromPath(sessionPath) {
+  if (typeof sessionPath !== 'string' || !sessionPath.trim()) return null;
+  const basename = path.basename(sessionPath.trim(), '.jsonl');
+  const match = basename.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+  return match ? match[1] : null;
+}
+
+function generatedImagePathForCall(sessionPath, callID) {
+  if (typeof callID !== 'string' || !callID.trim()) return null;
+  const sessionID = sessionIDFromPath(sessionPath);
+  if (!sessionID) return null;
+  return path.join(CODEX_HOME, 'generated_images', sessionID, `${callID.trim()}.png`);
+}
+
+function materializeGeneratedImage(sessionPath, payload = {}) {
+  const callID =
+    (typeof payload.call_id === 'string' && payload.call_id.trim()) ||
+    (typeof payload.id === 'string' && payload.id.trim()) ||
+    null;
+  const explicitPath =
+    (typeof payload.path === 'string' && payload.path.trim()) ||
+    (typeof payload.localPath === 'string' && payload.localPath.trim()) ||
+    (typeof payload.local_path === 'string' && payload.local_path.trim()) ||
+    null;
+  if (explicitPath) return explicitPath;
+  const generatedPath = generatedImagePathForCall(sessionPath, callID);
+  if (!generatedPath) return null;
+  if (existsSync(generatedPath)) return generatedPath;
+  const base64 = typeof payload.result === 'string' ? payload.result.trim() : '';
+  if (!base64) return null;
+  try {
+    mkdirSync(path.dirname(generatedPath), { recursive: true });
+    writeFileSync(generatedPath, Buffer.from(base64, 'base64'));
+    return generatedPath;
+  } catch (error) {
+    console.warn(`Failed to materialize generated image ${callID}: ${error.message}`);
+    return null;
+  }
+}
+
+function sessionImageGenerationMessage(record, payload, index, sessionPath) {
+  if (!payload || typeof payload !== 'object') return null;
+  const callID =
+    (typeof payload.call_id === 'string' && payload.call_id.trim()) ||
+    (typeof payload.id === 'string' && payload.id.trim()) ||
+    `session-image-${index}`;
+  const localPath = materializeGeneratedImage(sessionPath, payload);
+  if (!localPath) return null;
+  return {
+    id: `generated-image-${callID}`,
+    role: 'assistant',
+    text: 'Generated image',
+    createdAt: sessionTimestampToEpochSeconds(record.timestamp),
+    sortIndex: index,
+    attachments: [
+      {
+        id: `${callID}-image`,
+        filename: path.basename(localPath) || 'generated-image.png',
+        mimeType: imageMimeTypeForPath(localPath),
+        kind: 'image',
+        localPath,
+        ...imagePreviewPayload(localPath),
+      },
+    ],
+  };
+}
+
+function parseSessionMessages(fileText, sessionPath = '') {
   const messages = [];
+  const seenImageCallIDs = new Set();
   const lines = fileText.split('\n');
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -398,6 +525,21 @@ function parseSessionMessages(fileText) {
 
     if (record?.type === 'event_msg') {
       const payload = record.payload;
+      const payloadType = typeof payload?.type === 'string' ? payload.type.toLowerCase() : '';
+      if (payloadType === 'image_generation_end') {
+        const callID =
+          (typeof payload.call_id === 'string' && payload.call_id.trim()) ||
+          (typeof payload.id === 'string' && payload.id.trim()) ||
+          `session-image-${index}`;
+        if (!seenImageCallIDs.has(callID)) {
+          const imageMessage = sessionImageGenerationMessage(record, payload, index, sessionPath);
+          if (imageMessage) {
+            seenImageCallIDs.add(callID);
+            pushSessionMessage(messages, imageMessage);
+          }
+        }
+        continue;
+      }
       const item = payload?.item;
       const itemType = typeof item?.type === 'string' ? item.type.toLowerCase() : '';
       if (payload?.type === 'item_completed' && itemType === 'plan') {
@@ -424,6 +566,21 @@ function parseSessionMessages(fileText) {
 
     if (record?.type === 'response_item') {
       const payload = record.payload;
+      const payloadType = typeof payload?.type === 'string' ? payload.type.toLowerCase() : '';
+      if (payloadType === 'image_generation_call') {
+        const callID =
+          (typeof payload.call_id === 'string' && payload.call_id.trim()) ||
+          (typeof payload.id === 'string' && payload.id.trim()) ||
+          `session-image-${index}`;
+        if (!seenImageCallIDs.has(callID)) {
+          const imageMessage = sessionImageGenerationMessage(record, payload, index, sessionPath);
+          if (imageMessage) {
+            seenImageCallIDs.add(callID);
+            pushSessionMessage(messages, imageMessage);
+          }
+        }
+        continue;
+      }
       if (!payload || payload.type !== 'message') continue;
       const role = payload.role;
       if (!['user', 'assistant'].includes(role)) continue;
@@ -516,7 +673,7 @@ function readSessionHistoryPage(params = {}) {
     } catch (error) {
       return { error: { code: -32603, message: `Could not read session file: ${error.message}` } };
     }
-    messages = cacheSessionHistory(resolvedPath, fileStats, parseSessionMessages(fileText));
+    messages = cacheSessionHistory(resolvedPath, fileStats, parseSessionMessages(fileText, resolvedPath));
   }
 
   const end = beforeCursor == null ? messages.length : Math.min(beforeCursor, messages.length);
@@ -548,6 +705,9 @@ function sanitizeSessionHistoryAttachment(attachment) {
     filename: attachment.filename,
     mimeType: attachment.mimeType,
     kind: attachment.kind,
+    ...(typeof attachment.dataBase64 === 'string' && Buffer.byteLength(attachment.dataBase64, 'utf8') <= IMAGE_PREVIEW_MAX_BASE64_BYTES
+      ? { dataBase64: attachment.dataBase64 }
+      : {}),
     ...(typeof attachment.localPath === 'string' ? { localPath: attachment.localPath } : {}),
     ...(safeRemoteURL ? { remoteURL: safeRemoteURL } : {}),
     ...(remoteURL && !safeRemoteURL ? { remoteOmitted: true } : {}),
@@ -1613,6 +1773,46 @@ function sanitizeFileChanges(changes) {
   }).filter(Boolean);
 }
 
+function imageAttachmentFromPayload(payload, fallbackID = 'image') {
+  if (!payload || typeof payload !== 'object') return null;
+  const localPath =
+    (typeof payload.path === 'string' && payload.path.trim()) ||
+    (typeof payload.localPath === 'string' && payload.localPath.trim()) ||
+    (typeof payload.local_path === 'string' && payload.local_path.trim()) ||
+    null;
+  const remoteURL =
+    (typeof payload.url === 'string' && payload.url.trim()) ||
+    (typeof payload.remoteURL === 'string' && payload.remoteURL.trim()) ||
+    (typeof payload.remote_url === 'string' && payload.remote_url.trim()) ||
+    (typeof payload.imageUrl === 'string' && payload.imageUrl.trim()) ||
+    (typeof payload.image_url === 'string' && payload.image_url.trim()) ||
+    null;
+  const inlineBase64 = typeof payload.result === 'string' ? payload.result.trim() : '';
+  const dataURL =
+    !localPath && !remoteURL && inlineBase64 && inlineBase64.length <= MAX_MESSAGE_BYTES
+      ? `data:image/png;base64,${inlineBase64}`
+      : null;
+  if (!localPath && !remoteURL && !dataURL) return null;
+  return {
+    id:
+      (typeof payload.id === 'string' && payload.id.trim()) ||
+      `${fallbackID}-image`,
+    filename:
+      (typeof payload.filename === 'string' && payload.filename.trim()) ||
+      path.basename(localPath || remoteURL) ||
+      'generated-image.png',
+    mimeType:
+      (typeof payload.mimeType === 'string' && payload.mimeType.trim()) ||
+      (typeof payload.mime_type === 'string' && payload.mime_type.trim()) ||
+      imageMimeTypeForPath(localPath || remoteURL) ||
+      'image/*',
+    kind: 'image',
+    ...(localPath ? { localPath } : {}),
+    ...(remoteURL || dataURL ? { remoteURL: remoteURL || dataURL } : {}),
+    ...(localPath ? imagePreviewPayload(localPath) : {}),
+  };
+}
+
 function sanitizeItem(item) {
   if (!item || typeof item !== 'object') return null;
   const type = item.type;
@@ -1626,6 +1826,13 @@ function sanitizeItem(item) {
     filechange: 'fileChange',
     mcptoolcall: 'mcpToolCall',
     websearch: 'webSearch',
+    imageview: 'imageView',
+    image_view: 'imageView',
+    imagegeneration: 'imageGeneration',
+    image_generation: 'imageGeneration',
+    image_generation_call: 'imageGeneration',
+    image_generation_end: 'imageGeneration',
+    imagegen: 'imageGeneration',
     contextcompaction: 'contextCompaction',
     enteredreviewmode: 'enteredReviewMode',
     exitedreviewmode: 'exitedReviewMode',
@@ -1640,6 +1847,8 @@ function sanitizeItem(item) {
     'fileChange',
     'mcpToolCall',
     'webSearch',
+    'imageView',
+    'imageGeneration',
     'contextCompaction',
     'enteredReviewMode',
     'exitedReviewMode',
@@ -1656,12 +1865,18 @@ function sanitizeItem(item) {
       if (part.type === 'localImage' && typeof part.path === 'string') {
         return { type: 'localImage', path: part.path };
       }
+      const imagePath =
+        (typeof part.path === 'string' && part.path.trim()) ||
+        (typeof part.localPath === 'string' && part.localPath.trim()) ||
+        (typeof part.local_path === 'string' && part.local_path.trim()) ||
+        null;
       const imageURL =
         (typeof part.url === 'string' && part.url.trim()) ||
         (typeof part.image_url === 'string' && part.image_url.trim()) ||
+        (typeof part.imageUrl === 'string' && part.imageUrl.trim()) ||
         null;
-      if (['image', 'input_image', 'output_image'].includes(part.type) && imageURL) {
-        return { type: part.type, url: imageURL };
+      if (['image', 'input_image', 'output_image'].includes(part.type) && (imagePath || imageURL)) {
+        return { type: part.type, ...(imagePath ? { path: imagePath } : {}), ...(imageURL ? { url: imageURL } : {}) };
       }
       return null;
     }).filter(Boolean);
@@ -1728,6 +1943,26 @@ function sanitizeItem(item) {
       completedAt: item.completedAt,
       status: item.status,
       query: truncateText(item.query, 400),
+    };
+  }
+
+  if (['imageView', 'imageGeneration'].includes(canonicalType)) {
+    const attachment =
+      imageAttachmentFromPayload(item, item.id || canonicalType) ||
+      imageAttachmentFromPayload(item.image, item.id || canonicalType) ||
+      imageAttachmentFromPayload(item.imageView, item.id || canonicalType) ||
+      imageAttachmentFromPayload(item.image_view, item.id || canonicalType) ||
+      imageAttachmentFromPayload(item.output, item.id || canonicalType) ||
+      imageAttachmentFromPayload(item.result, item.id || canonicalType);
+    if (!attachment) return null;
+    return {
+      id: item.id,
+      type: 'imageView',
+      createdAt: item.createdAt,
+      completedAt: item.completedAt,
+      status: item.status,
+      text: typeof item.text === 'string' ? truncateText(item.text, 800) : 'Generated image',
+      imageView: attachment,
     };
   }
 
