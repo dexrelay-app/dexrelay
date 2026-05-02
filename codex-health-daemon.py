@@ -33,6 +33,9 @@ RELAY_SERVER_PORT = int(os.environ.get("CODEX_RELAY_RELAY_SERVER_PORT", "4620"))
 DEFAULT_PROJECT = str(PROJECTS_ROOT)
 SERVICECTL_SCRIPT = SCRIPT_DIR / "servicectl.py"
 GOVERNANCECTL_SCRIPT = SCRIPT_DIR / "governancectl.py"
+CODEX_FAST_SCRIPT = SCRIPT_DIR / "codex-fast.py"
+if not CODEX_FAST_SCRIPT.exists():
+    CODEX_FAST_SCRIPT = Path(__file__).resolve().with_name("codex-fast.py")
 DISCOVERED_PROJECTS_PATH = COMMAND_CENTER_DIR / "discovered-projects.json"
 GOVERNANCE_SUMMARY_PATH = COMMAND_CENTER_DIR / "codex-governance.json"
 IGNORED_PROJECT_DIRS = {
@@ -221,6 +224,121 @@ def action_response(name: str, result: dict[str, object]) -> dict[str, object]:
     }
 
 
+def parse_codex_fast_output(text: str) -> dict[str, object]:
+    metrics: dict[str, object] = {}
+    large_sessions: list[dict[str, object]] = []
+    node_processes: list[dict[str, object]] = []
+    blocking_processes: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        key = parts[0]
+        if key == "large_session_mb" and len(parts) >= 3:
+            try:
+                large_sessions.append({"mb": float(parts[1]), "label": parts[2]})
+            except ValueError:
+                pass
+            continue
+        if key == "node_mb" and len(parts) >= 2:
+            try:
+                node_processes.append({"mb": float(parts[1]), "process": " ".join(parts[2:]) or "node"})
+            except ValueError:
+                pass
+            continue
+        if key == "blocking_process" and len(parts) >= 2:
+            blocking_processes.append(" ".join(parts[1:]))
+            continue
+        if len(parts) >= 2:
+            value = " ".join(parts[1:])
+            try:
+                if "." in value and value.replace(".", "", 1).isdigit():
+                    metrics[key] = float(value)
+                elif value.lstrip("-").isdigit():
+                    metrics[key] = int(value)
+                else:
+                    metrics[key] = value
+            except ValueError:
+                metrics[key] = value
+
+    return {
+        "metrics": metrics,
+        "largeSessions": large_sessions,
+        "nodeProcesses": node_processes,
+        "blockingProcesses": blocking_processes,
+    }
+
+
+def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]]:
+    metrics = parsed.get("metrics") if isinstance(parsed.get("metrics"), dict) else {}
+    recommendations: list[dict[str, str]] = []
+    old_sessions = int(metrics.get("old_session_candidates") or 0)
+    logs_mb = float(metrics.get("logs_mb") or 0)
+    config_prune = int(metrics.get("config_prune_candidates") or 0)
+    worktrees = int(metrics.get("worktree_candidates") or 0)
+    if old_sessions > 0:
+        recommendations.append({
+            "title": "Archive old Codex sessions",
+            "impact": "Can reduce heavy resume/history scans. Important active work should get a handoff first.",
+            "severity": "warn" if old_sessions < 50 else "high",
+        })
+    if logs_mb >= 64:
+        recommendations.append({
+            "title": "Rotate large Codex logs",
+            "impact": "Can reduce local database/file churn from oversized logs. Logs are archived, not deleted.",
+            "severity": "warn" if logs_mb < 512 else "high",
+        })
+    if config_prune > 0:
+        recommendations.append({
+            "title": "Prune dead Codex project entries",
+            "impact": "Removes stale project references so Codex has fewer irrelevant local paths to consider.",
+            "severity": "warn",
+        })
+    if worktrees > 0:
+        recommendations.append({
+            "title": "Move stale worktrees",
+            "impact": "Keeps old temporary worktrees out of the hot path while preserving them in an archive.",
+            "severity": "warn",
+        })
+    if not recommendations:
+        recommendations.append({
+            "title": "Codex local state looks lean",
+            "impact": "No obvious session/log/worktree cleanup candidate was found.",
+            "severity": "ok",
+        })
+    return recommendations
+
+
+def codex_fast_command(mode: str, *, wait_for_codex_exit: bool = False) -> dict[str, object]:
+    if not CODEX_FAST_SCRIPT.exists():
+        return {"ok": False, "error": f"missing {CODEX_FAST_SCRIPT}"}
+    args = ""
+    if mode == "backup":
+        args = "--backup-only"
+    elif mode == "apply":
+        args = "--apply"
+        if wait_for_codex_exit:
+            args += " --wait-for-codex-exit"
+    elif mode != "report":
+        return {"ok": False, "error": f"unsupported codex-fast mode: {mode}"}
+
+    result = run_shell(f"python3 {shlex.quote(str(CODEX_FAST_SCRIPT))} {args}".strip(), timeout=240)
+    stdout = str(result.get("stdout", "") or "")
+    stderr = str(result.get("stderr", "") or "")
+    parsed = parse_codex_fast_output(stdout)
+    return {
+        "ok": int(result.get("exitCode", 1)) == 0,
+        "mode": mode,
+        "exitCode": result.get("exitCode", 1),
+        "stdout": stdout,
+        "stderr": stderr,
+        "summary": parsed,
+        "recommendations": codex_fast_recommendations(parsed),
+        "status": gather_status(),
+    }
+
+
 def list_services() -> dict[str, object]:
     if not SERVICECTL_SCRIPT.exists():
         return {"ok": False, "error": f"missing {SERVICECTL_SCRIPT}"}
@@ -326,6 +444,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/governance":
             self._send_json(governance_command("summary"))
             return
+        if parsed.path == "/api/codex-fast":
+            payload = codex_fast_command("report")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
         if parsed.path == "/api/project-metrics":
             project_path = (query.get("path") or [""])[0]
             if not project_path.strip():
@@ -399,6 +521,18 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/actions/update-project-governance":
             payload = governance_command("update-project", body=body, timeout=120)
             payload["status"] = gather_status()
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
+        if parsed.path == "/api/actions/codex-fast-report":
+            payload = codex_fast_command("report")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
+        if parsed.path == "/api/actions/codex-fast-backup":
+            payload = codex_fast_command("backup")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
+        if parsed.path == "/api/actions/codex-fast-apply":
+            payload = codex_fast_command("apply", wait_for_codex_exit=bool(body.get("waitForCodexExit")))
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
         if parsed.path.startswith("/api/services/"):

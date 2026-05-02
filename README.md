@@ -52,6 +52,8 @@ https://assets.dexrelay.app/services.registry.json
 https://assets.dexrelay.app/servicectl.py
 https://assets.dexrelay.app/rebuild-workspace-services.py
 https://assets.dexrelay.app/migrate-dexrelay-state.py
+https://assets.dexrelay.app/codex-fast.py
+https://assets.dexrelay.app/codex-health-daemon.py
 https://assets.dexrelay.app/setup-guide.html
 https://assets.dexrelay.app/dexrelay-skill.md
 ```

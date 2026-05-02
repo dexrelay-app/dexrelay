@@ -71,6 +71,7 @@ LOCAL_RELAY_SERVER_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-server.js"
 LOCAL_RELAY_CONNECTOR_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-connector.js"
 LOCAL_QUIC_GATEWAY_SOURCE="$LOCAL_PAYLOAD_ROOT/quic-bridge-gateway.swift"
 LOCAL_PACKAGE_SOURCE="$LOCAL_PAYLOAD_ROOT/package.json"
+LOCAL_CODEX_FAST_SOURCE="$LOCAL_PAYLOAD_ROOT/codex-fast.py"
 LOCAL_HELPER_SOURCE="$LOCAL_PAYLOAD_ROOT/helper.py"
 LOCAL_CREATE_PROJECT_SOURCE="$LOCAL_PAYLOAD_ROOT/create-mac-project.sh"
 LOCAL_GIT_AUTOMATION_SOURCE="$LOCAL_PAYLOAD_ROOT/git-project-automation.sh"
@@ -94,6 +95,7 @@ REMOTE_RELAY_SERVER_SOURCE="$SETUP_BASE_URL/relay-server.js"
 REMOTE_RELAY_CONNECTOR_SOURCE="$SETUP_BASE_URL/relay-connector.js"
 REMOTE_QUIC_GATEWAY_SOURCE="$SETUP_BASE_URL/quic-bridge-gateway.swift"
 REMOTE_PACKAGE_SOURCE="$SETUP_BASE_URL/package.json"
+REMOTE_CODEX_FAST_SOURCE="$SETUP_BASE_URL/codex-fast.py"
 REMOTE_HELPER_SOURCE="$SETUP_BASE_URL/helper.py"
 REMOTE_CREATE_PROJECT_SOURCE="$SETUP_BASE_URL/create-mac-project.sh"
 REMOTE_GIT_AUTOMATION_SOURCE="$SETUP_BASE_URL/git-project-automation.sh"
@@ -512,6 +514,12 @@ install_runtime_scripts() {
     curl -fsSL "$REMOTE_IOS_TESTFLIGHT_COMMON_SOURCE" -o "$SCRIPTS_DIR/ios_testflight_common.py"
   fi
 
+  if [[ -f "$LOCAL_CODEX_FAST_SOURCE" ]]; then
+    cp "$LOCAL_CODEX_FAST_SOURCE" "$SCRIPTS_DIR/codex-fast.py"
+  else
+    curl -fsSL "$REMOTE_CODEX_FAST_SOURCE" -o "$SCRIPTS_DIR/codex-fast.py"
+  fi
+
   if [[ -f "$LOCAL_HEALTHD_SOURCE" ]]; then
     cp "$LOCAL_HEALTHD_SOURCE" "$SCRIPTS_DIR/codex-health-daemon.py"
   else
@@ -536,7 +544,7 @@ install_runtime_scripts() {
     curl -fsSL "$REMOTE_HEALTH_UI_STYLES_SOURCE" -o "$HEALTH_UI_DIR/styles.css"
   fi
 
-  chmod +x "$SCRIPTS_DIR/create-mac-project.sh" "$SCRIPTS_DIR/git-project-automation.sh" "$SCRIPTS_DIR/governancectl.py" "$SCRIPTS_DIR/servicectl.py" "$SCRIPTS_DIR/rebuild-workspace-services.py" "$SCRIPTS_DIR/migrate-dexrelay-state.py" "$SCRIPTS_DIR/xcode-devdir.sh" "$SCRIPTS_DIR/run-ios-device.sh" "$SCRIPTS_DIR/run-ios-on-phone.sh" "$SCRIPTS_DIR/publish-ios-adhoc-ota.sh" "$SCRIPTS_DIR/prepare-ios-testflight.py" "$SCRIPTS_DIR/codex-health-daemon.py"
+  chmod +x "$SCRIPTS_DIR/create-mac-project.sh" "$SCRIPTS_DIR/git-project-automation.sh" "$SCRIPTS_DIR/governancectl.py" "$SCRIPTS_DIR/servicectl.py" "$SCRIPTS_DIR/rebuild-workspace-services.py" "$SCRIPTS_DIR/migrate-dexrelay-state.py" "$SCRIPTS_DIR/xcode-devdir.sh" "$SCRIPTS_DIR/run-ios-device.sh" "$SCRIPTS_DIR/run-ios-on-phone.sh" "$SCRIPTS_DIR/publish-ios-adhoc-ota.sh" "$SCRIPTS_DIR/prepare-ios-testflight.py" "$SCRIPTS_DIR/codex-fast.py" "$SCRIPTS_DIR/codex-health-daemon.py"
   python3 "$SCRIPTS_DIR/servicectl.py" sync-conf >/dev/null 2>&1 || true
 }
 

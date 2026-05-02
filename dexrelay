@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.53}"
+VERSION="${VERSION:-0.1.54}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -77,6 +77,9 @@ Usage:
   dexrelay wake on
   dexrelay wake off
   dexrelay wake status
+  dexrelay codex-fast report
+  dexrelay codex-fast backup
+  dexrelay codex-fast apply
   dexrelay doctor
   dexrelay version
 
@@ -88,6 +91,8 @@ Commands:
   relay-pair Prepare the relay runtime automatically and print a relay bootstrap QR.
   uninstall Remove the DexRelay runtime, launch agents, logs, and installed DexRelay CLI.
   wake      Control the keep-awake launch agent (on, off, status).
+  codex-fast
+            Report and safely maintain local Codex session/log state.
   doctor    Print the installed payload location and expected runtime paths.
   version   Print the DexRelay CLI wrapper version.
 EOF
@@ -734,6 +739,46 @@ DexRelay CLI wrapper
 EOF
 }
 
+codex_fast_script_path() {
+  if [[ -f "$RUNTIME_ROOT/scripts/codex-fast.py" ]]; then
+    printf '%s\n' "$RUNTIME_ROOT/scripts/codex-fast.py"
+    return 0
+  fi
+  if [[ -f "$PAYLOAD_ROOT/codex-fast.py" ]]; then
+    printf '%s\n' "$PAYLOAD_ROOT/codex-fast.py"
+    return 0
+  fi
+  return 1
+}
+
+codex_fast_command() {
+  local action="${1:-report}"
+  shift || true
+  local script_path
+  if ! script_path="$(codex_fast_script_path)"; then
+    printf 'DexRelay codex-fast script is not installed yet.\n' >&2
+    printf 'Run `dexrelay install` to update the Mac runtime.\n' >&2
+    return 1
+  fi
+
+  case "$action" in
+    report|check)
+      python3 "$script_path" "$@"
+      ;;
+    backup)
+      python3 "$script_path" --backup-only "$@"
+      ;;
+    apply|cleanup|clean)
+      python3 "$script_path" --apply "$@"
+      ;;
+    *)
+      printf 'Unknown codex-fast action: %s\n' "$action" >&2
+      printf 'Usage: dexrelay codex-fast [report|backup|apply]\n' >&2
+      return 1
+      ;;
+  esac
+}
+
 pair_command() {
   local helper_json pairing_uri pairing_id expires_at preferred_host
 
@@ -912,6 +957,10 @@ case "$cmd" in
   wake)
     shift || true
     wake_command "$@"
+    ;;
+  codex-fast)
+    shift || true
+    codex_fast_command "$@"
     ;;
   doctor)
     doctor_command
