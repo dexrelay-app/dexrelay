@@ -75,17 +75,35 @@ function formatDuration(ms) {
     : `${minutes}m ${remainingSeconds}s`;
 }
 
+function packageVersion() {
+  try {
+    const packageJSON = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+    return packageJSON.version || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 function renderHelpfulCommands() {
+  const version = packageVersion();
   return [
-    "DexRelay is ready on this Mac.",
+    `DexRelay ${version} is ready on this Mac.`,
+    "",
+    "Open the DexRelay iOS app. It should automatically find this Mac on local Wi-Fi.",
+    "If it does not appear, tap the Mac/Apple connect icon in the app and use QR pairing.",
     "",
     "Useful commands:",
-    "  dexrelay status   Check bridge, helper, and Tailscale health",
-    "  dexrelay pair     Show the QR for the iPhone app",
-    "  dexrelay repair   Repair the DexRelay runtime if services drift",
-    "  dexrelay doctor   Show install paths and runtime metadata",
+    "  dexrelay version             Show the installed DexRelay CLI version",
+    "  dexrelay status              Check bridge, helper, Tailscale, and wake health",
+    "  dexrelay pair                Show an optional QR code for iPhone pairing",
+    "  dexrelay relay-pair          Prepare relay bootstrap and show relay QR",
+    "  dexrelay repair              Repair the DexRelay runtime if services drift",
+    "  dexrelay wake on|off|status  Keep this Mac awake for remote sessions",
+    "  dexrelay codex-fast report   Find slow/heavy Codex local state",
+    "  dexrelay codex-fast apply    Back up and safely archive old Codex state",
+    "  dexrelay doctor              Show install paths and runtime metadata",
     "",
-    "Next step: run `dexrelay pair` and scan it from the iPhone app.",
+    "Next step: open the DexRelay iOS app. Use `dexrelay pair` only if automatic discovery does not find this Mac.",
   ];
 }
 

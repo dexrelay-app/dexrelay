@@ -62,6 +62,7 @@ QUIC_GATEWAY_PORT="${CODEX_RELAY_QUIC_PORT:-4617}"
 RUNTIME_MANIFEST_PATH="$INSTALL_ROOT/runtime-manifest.json"
 INSTALL_MODE="${CODEX_RELAY_INSTALL_MODE:-direct-install-script}"
 AUTO_INSTALL="${CODEX_RELAY_AUTO_INSTALL:-0}"
+DEXRELAY_PAYLOAD_VERSION="${CODEX_RELAY_PAYLOAD_VERSION:-0.1.55}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_INSTALL_SCRIPT="$SCRIPT_DIR/install.sh"
@@ -1618,12 +1619,31 @@ maybe_start_relay_connector_launch_agent() {
 }
 
 show_next_steps() {
+  local payload_version="unknown"
+  if [[ -f "$LOCAL_PACKAGE_SOURCE" ]]; then
+    payload_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$LOCAL_PACKAGE_SOURCE" | head -n 1)"
+  elif [[ -f "$SCRIPTS_DIR/../package.json" ]]; then
+    payload_version="$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPTS_DIR/../package.json" | head -n 1)"
+  fi
+  payload_version="${payload_version:-$DEXRELAY_PAYLOAD_VERSION}"
+
   log "Setup complete"
+  printf "\nDexRelay %s is ready on this Mac.\n" "$payload_version"
   printf "\nNext steps:\n"
-  printf "1. Open Codex Relay on your iPhone or iPad.\n"
-  printf "2. On this Mac, run: dexrelay pair\n"
-  printf "3. In the app, tap Scan Connection QR and scan the code from Terminal.\n"
-  printf "4. Optional: install Tailscale on your Mac and iPhone for remote access away from local Wi-Fi.\n"
+  printf "1. Open the DexRelay iOS app. It should automatically find this Mac on local Wi-Fi.\n"
+  printf "2. If it does not appear, tap the Mac/Apple connect icon and use optional QR pairing.\n"
+  printf "3. Optional QR: run dexrelay pair, then scan the code from the app.\n"
+  printf "4. Optional remote access: install Tailscale on your Mac and iPhone for away-from-Wi-Fi use.\n"
+  printf "\nUseful commands:\n"
+  printf -- "- dexrelay version             Show the installed DexRelay CLI version\n"
+  printf -- "- dexrelay status              Check bridge, helper, Tailscale, and wake health\n"
+  printf -- "- dexrelay pair                Show an optional QR code for iPhone pairing\n"
+  printf -- "- dexrelay relay-pair          Prepare relay bootstrap and show relay QR\n"
+  printf -- "- dexrelay repair              Repair the DexRelay runtime if services drift\n"
+  printf -- "- dexrelay wake on|off|status  Keep this Mac awake for remote sessions\n"
+  printf -- "- dexrelay codex-fast report   Find slow/heavy Codex local state\n"
+  printf -- "- dexrelay codex-fast apply    Back up and safely archive old Codex state\n"
+  printf -- "- dexrelay doctor              Show install paths and runtime metadata\n"
   printf "\nInstalled files:\n"
   printf -- "- Runtime root: %s\n" "$INSTALL_ROOT"
   printf -- "- Admin workspace: %s\n" "$ADMIN_PROJECT_ROOT"
