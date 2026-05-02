@@ -46,6 +46,7 @@ RELAY_CONNECTOR_LABEL="${CODEX_RELAY_RELAY_CONNECTOR_LABEL:-com.codexrelay.relay
 RELAY_CONNECTOR_PLIST="$LAUNCH_AGENTS_DIR/$RELAY_CONNECTOR_LABEL.plist"
 QUIC_GATEWAY_LABEL="${CODEX_RELAY_QUIC_GATEWAY_LABEL:-com.dexrelay.quicgateway.bootstrap}"
 QUIC_GATEWAY_PLIST="$LAUNCH_AGENTS_DIR/$QUIC_GATEWAY_LABEL.plist"
+ENABLE_QUIC="${CODEX_RELAY_ENABLE_QUIC:-0}"
 KEEP_AWAKE="${CODEX_RELAY_KEEP_AWAKE:-1}"
 AWAKE_LABEL="${CODEX_RELAY_KEEP_AWAKE_LABEL:-com.codexrelay.keepawake.bootstrap}"
 AWAKE_PLIST="$LAUNCH_AGENTS_DIR/$AWAKE_LABEL.plist"
@@ -118,6 +119,13 @@ log() {
 
 phase() {
   log "Phase $1"
+}
+
+quic_enabled() {
+  case "$(printf '%s' "$ENABLE_QUIC" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 warn() {
@@ -550,8 +558,14 @@ migrate_project_state() {
 
 write_runtime_manifest() {
   local installed_at
+  local quic_port_json="null"
+  local quic_enabled_json="false"
   mkdir -p "$INSTALL_ROOT"
   installed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  if quic_enabled; then
+    quic_port_json="$QUIC_GATEWAY_PORT"
+    quic_enabled_json="true"
+  fi
 
   cat >"$RUNTIME_MANIFEST_PATH" <<EOF
 {
@@ -594,7 +608,8 @@ PY
 ),
   "helperPort": $HELPER_PORT,
   "bridgePort": $BRIDGE_PORT,
-  "quicPort": $QUIC_GATEWAY_PORT,
+  "quicEnabled": $quic_enabled_json,
+  "quicPort": $quic_port_json,
   "healthPort": $HEALTH_PORT,
   "relayServerPort": $RELAY_SERVER_PORT
 }
@@ -918,6 +933,7 @@ exec env \
   CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
   CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
   CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+  CODEX_RELAY_ENABLE_QUIC="$ENABLE_QUIC" \
   CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
   CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
   CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
@@ -952,6 +968,7 @@ exec env \
   CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
   CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
   CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+  CODEX_RELAY_ENABLE_QUIC="$ENABLE_QUIC" \
   CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
   CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
   CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
@@ -1099,6 +1116,7 @@ RELAY_CONNECTOR_LABEL="$RELAY_CONNECTOR_LABEL"
 RELAY_CONNECTOR_PLIST="$RELAY_CONNECTOR_PLIST"
 QUIC_GATEWAY_LABEL="$QUIC_GATEWAY_LABEL"
 QUIC_GATEWAY_PLIST="$QUIC_GATEWAY_PLIST"
+ENABLE_QUIC="$ENABLE_QUIC"
 RELAY_STATE_DIR="$RELAY_STATE_DIR"
 BRIDGE_PORT="$BRIDGE_PORT"
 HELPER_PORT="$HELPER_PORT"
@@ -1162,6 +1180,7 @@ repair_runtime() {
     CODEX_RELAY_ADMIN_PROJECT_ROOT="$ADMIN_PROJECT_ROOT" \
     CODEX_RELAY_LABEL="$BRIDGE_LABEL" \
     CODEX_RELAY_BRIDGE_PORT="$BRIDGE_PORT" \
+    CODEX_RELAY_ENABLE_QUIC="$ENABLE_QUIC" \
     CODEX_RELAY_QUIC_PORT="$QUIC_GATEWAY_PORT" \
     CODEX_RELAY_HELPER_LABEL="$HELPER_LABEL" \
     CODEX_RELAY_HELPER_PORT="$HELPER_PORT" \
@@ -1203,10 +1222,14 @@ while true; do
     unhealthy=1
   fi
 
-  if ! lsof -nP -iUDP:"\$QUIC_GATEWAY_PORT" >/dev/null 2>&1; then
-    restart_agent "\$QUIC_GATEWAY_LABEL" "\$QUIC_GATEWAY_PLIST"
-    unhealthy=1
-  fi
+  case "\$(printf '%s' "\$ENABLE_QUIC" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      if ! lsof -nP -iUDP:"\$QUIC_GATEWAY_PORT" >/dev/null 2>&1; then
+        restart_agent "\$QUIC_GATEWAY_LABEL" "\$QUIC_GATEWAY_PLIST"
+        unhealthy=1
+      fi
+      ;;
+  esac
 
   if [[ -f "\$RELAY_STATE_DIR/connector.env" ]] && ! launchctl print "gui/\$(id -u)/\$RELAY_CONNECTOR_LABEL" >/dev/null 2>&1; then
     restart_agent "\$RELAY_CONNECTOR_LABEL" "\$RELAY_CONNECTOR_PLIST"
@@ -1633,14 +1656,20 @@ main() {
   write_healthd_start_script
   write_relay_server_start_script
   write_relay_connector_start_script
-  write_quic_gateway_start_script
+  if quic_enabled; then
+    write_quic_gateway_start_script
+  fi
   write_watchdog_start_script
   write_launch_agent
   write_helper_launch_agent
   write_healthd_launch_agent
   write_relay_server_launch_agent
   write_relay_connector_launch_agent
-  write_quic_gateway_launch_agent
+  if quic_enabled; then
+    write_quic_gateway_launch_agent
+  else
+    rm -f "$QUIC_GATEWAY_PLIST"
+  fi
   write_watchdog_launch_agent
   write_awake_launch_agent
 
@@ -1648,7 +1677,11 @@ main() {
   start_helper_launch_agent
   start_launch_agent "$HEALTHD_LABEL" "$HEALTHD_PLIST"
   start_launch_agent "$BRIDGE_LABEL" "$BRIDGE_PLIST"
-  start_launch_agent "$QUIC_GATEWAY_LABEL" "$QUIC_GATEWAY_PLIST"
+  if quic_enabled; then
+    start_launch_agent "$QUIC_GATEWAY_LABEL" "$QUIC_GATEWAY_PLIST"
+  else
+    stop_launch_agent "$QUIC_GATEWAY_LABEL"
+  fi
   start_launch_agent "$RELAY_SERVER_LABEL" "$RELAY_SERVER_PLIST"
   maybe_start_relay_connector_launch_agent
   start_launch_agent "$WATCHDOG_LABEL" "$WATCHDOG_PLIST"

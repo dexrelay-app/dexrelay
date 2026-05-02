@@ -50,6 +50,7 @@ private final class BridgeSession {
     init(connection: NWConnection) {
         self.connection = connection
         self.webSocket = URLSession.shared.webSocketTask(with: bridgeURL)
+        self.webSocket.maximumMessageSize = maxFrameBytes
     }
 
     func start() {

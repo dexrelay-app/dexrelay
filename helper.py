@@ -44,6 +44,7 @@ PROJECTS_ROOT = os.environ.get("CODEX_RELAY_PROJECTS_ROOT", os.path.expanduser("
 ADMIN_PROJECT_ROOT = os.environ.get("CODEX_RELAY_ADMIN_PROJECT_ROOT", os.path.join(PROJECTS_ROOT, "DexRelay Admin"))
 BRIDGE_LABEL = os.environ.get("CODEX_RELAY_LABEL", "com.codexrelay.bootstrap")
 BRIDGE_PORT = int(os.environ.get("CODEX_RELAY_BRIDGE_PORT", "4615"))
+ENABLE_QUIC = os.environ.get("CODEX_RELAY_ENABLE_QUIC", "0").strip().lower() in {"1", "true", "yes", "on"}
 QUIC_GATEWAY_PORT = int(os.environ.get("CODEX_RELAY_QUIC_PORT", "4617"))
 HELPER_LABEL = os.environ.get("CODEX_RELAY_HELPER_LABEL", "com.codexrelay.setuphelper")
 HELPER_PORT = int(os.environ.get("CODEX_RELAY_HELPER_PORT", "4616"))
@@ -128,17 +129,19 @@ def fallback_pairing_hosts(snapshot, primary_host: str):
                 yield trimmed
 
 
-def build_pairing_uri(pairing_id: str, token: str, host: str, helper_port: int, bridge_port: int, quic_port: int, expires_at: str, alt_hosts=None):
-    query = urlencode({
+def build_pairing_uri(pairing_id: str, token: str, host: str, helper_port: int, bridge_port: int, quic_port, expires_at: str, alt_hosts=None):
+    params = {
         "id": pairing_id,
         "token": token,
         "host": host,
         "helperPort": helper_port,
         "bridgePort": bridge_port,
-        "quicPort": quic_port,
         "expiresAt": expires_at,
         "altHost": list(alt_hosts or []),
-    }, doseq=True)
+    }
+    if quic_port is not None:
+        params["quicPort"] = quic_port
+    query = urlencode(params, doseq=True)
     return f"dexrelay-pair://claim?{query}"
 
 
@@ -189,6 +192,7 @@ def create_pairing(device_name=None):
     display_name = socket.gethostname()
     fallback_hosts = list(fallback_pairing_hosts(snapshot, host))
 
+    quic_port = QUIC_GATEWAY_PORT if ENABLE_QUIC else None
     payload = {
         "id": pairing_id,
         "tokenHash": token_hash,
@@ -196,7 +200,7 @@ def create_pairing(device_name=None):
         "altHosts": fallback_hosts,
         "helperPort": HELPER_PORT,
         "bridgePort": BRIDGE_PORT,
-        "quicPort": QUIC_GATEWAY_PORT,
+        "quicPort": quic_port,
         "createdAt": now_iso(),
         "expiresAt": expires_at,
         "claimedAt": None,
@@ -212,10 +216,10 @@ def create_pairing(device_name=None):
     return {
         "pairingId": pairing_id,
         "pairingToken": token,
-        "pairingURI": build_pairing_uri(pairing_id, token, host, HELPER_PORT, BRIDGE_PORT, QUIC_GATEWAY_PORT, expires_at, fallback_hosts),
+        "pairingURI": build_pairing_uri(pairing_id, token, host, HELPER_PORT, BRIDGE_PORT, quic_port, expires_at, fallback_hosts),
         "helperPort": HELPER_PORT,
         "bridgePort": BRIDGE_PORT,
-        "quicPort": QUIC_GATEWAY_PORT,
+        "quicPort": quic_port,
         "preferredHost": host,
         "displayName": display_name,
         "expiresAt": expires_at,
@@ -290,7 +294,8 @@ state = {
     "statusMessage": "Setup helper is idle",
     "bridgeReachable": False,
     "bridgePort": BRIDGE_PORT,
-    "quicPort": QUIC_GATEWAY_PORT,
+    "quicEnabled": ENABLE_QUIC,
+    "quicPort": QUIC_GATEWAY_PORT if ENABLE_QUIC else None,
     "installRoot": INSTALL_ROOT,
     "defaultInstallRoot": DEFAULT_RUNTIME_ROOT,
     "otaPublicRoot": OTA_PUBLIC_ROOT,

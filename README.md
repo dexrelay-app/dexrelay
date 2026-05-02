@@ -24,6 +24,8 @@ The current DexRelay product model is:
 
 So this payload is no longer just “install a bridge on `:4615`”.
 
+Default direct transport is WebSocket on `:4615`. QUIC remains in the payload as an experimental opt-in path only, because enabling it requires a local TLS/private-key identity on macOS and can trigger a Keychain prompt.
+
 It now owns:
 
 - QR pairing
@@ -84,6 +86,8 @@ Normal user flow should be:
 3. on the Mac, run `dexrelay pair`
 4. on the phone, scan the QR
 5. start coding
+
+Existing users upgrading from an older install should run `dexrelay repair` once so the runtime removes the old default QUIC gateway route and refreshes pairing metadata.
 
 Secondary install path:
 

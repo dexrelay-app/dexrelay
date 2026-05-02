@@ -39,6 +39,8 @@ The DexRelay skill flow should handle the complete operator path:
 6. use `dexrelay status` and `dexrelay repair` when something breaks
 7. refresh project governance when DexRelay is healthy but actions are stale
 
+Default direct transport is WebSocket on `:4615`. Treat QUIC as experimental opt-in only; do not suggest it for normal user setup unless someone explicitly asks for it and accepts the macOS Keychain/private-key prompt.
+
 ## Minimum skill coverage
 
 `dexrelay-setup` should be able to help with:
@@ -92,6 +94,8 @@ Start here:
 dexrelay status
 dexrelay repair
 ```
+
+After an upgrade from an older DexRelay install, use the same repair step once to unload the old default QUIC gateway and refresh pairing metadata.
 
 If repair is insufficient:
 
