@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -40,6 +41,14 @@ class SessionCandidate:
     source: Path
     relative: Path
     updated_at: int | None
+
+
+@dataclass
+class TempBuildCandidate:
+    path: Path
+    size: int
+    modified_at: float
+    reason: str
 
 
 def now_stamp() -> str:
@@ -421,6 +430,124 @@ def move_stale_worktrees(codex_home: Path, backup_root: Path, days: int, stamp: 
     report(f"worktree_manifest {manifest}")
 
 
+def temp_roots() -> list[Path]:
+    roots = [Path(tempfile.gettempdir()), Path("/tmp")]
+    env_tmp = os.environ.get("TMPDIR")
+    if env_tmp:
+        roots.append(Path(env_tmp))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        try:
+            canonical = str(canonical_path(root))
+        except OSError:
+            canonical = str(root)
+        if canonical not in seen and root.exists():
+            seen.add(canonical)
+            unique.append(root)
+    return unique
+
+
+def temp_build_reason(path: Path) -> str | None:
+    name = path.name
+    exact_names = {
+        "codex-ota": "DexRelay OTA package output",
+        "codex-ota-derived-data": "DexRelay OTA DerivedData",
+        "codexrelay-simulator-smoke": "DexRelay simulator smoke-test project",
+        "codexremote-tests": "CodexRemote test DerivedData",
+        "CodexPerfRegression": "DexRelay performance-test DerivedData",
+    }
+    if name in exact_names:
+        return exact_names[name]
+    prefix_reasons = [
+        ("CodexDeviceBuild.", "DexRelay iPhone run DerivedData"),
+        ("dexrelay-xcode-run-", "DexRelay app Run-on-iPhone DerivedData"),
+        ("CodexRemote-codex-", "DexRelay/CodexRemote verification DerivedData"),
+        ("CodexRemoteCLI", "CodexRemote CLI DerivedData"),
+        ("dexrelay-appstore-screenshots", "DexRelay App Store screenshot output"),
+    ]
+    for prefix, reason in prefix_reasons:
+        if name.startswith(prefix):
+            return reason
+    return None
+
+
+def stale_temp_build_candidates(older_than_hours: int) -> list[TempBuildCandidate]:
+    cutoff = time.time() - older_than_hours * 60 * 60
+    candidates: list[TempBuildCandidate] = []
+    seen: set[str] = set()
+    for root in temp_roots():
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            reason = temp_build_reason(path)
+            if reason is None:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime >= cutoff:
+                continue
+            canonical = str(canonical_path(path))
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            candidates.append(
+                TempBuildCandidate(
+                    path=path,
+                    size=size_bytes(path),
+                    modified_at=stat.st_mtime,
+                    reason=reason,
+                )
+            )
+    candidates.sort(key=lambda item: item.size, reverse=True)
+    return candidates
+
+
+def clean_stale_temp_builds(backup_root: Path, older_than_hours: int, apply: bool, details: bool) -> None:
+    candidates = stale_temp_build_candidates(older_than_hours)
+    total = sum(item.size for item in candidates)
+    report(f"xcode_tmp_candidates {len(candidates)}")
+    report(f"xcode_tmp_candidate_gb {gb(total)}")
+    for index, item in enumerate(candidates[:10], start=1):
+        label = f"xcode_tmp_{index:03d}"
+        if details:
+            age_hours = max(0.0, (time.time() - item.modified_at) / 3600)
+            report(f"xcode_tmp_mb {mb(item.size)} {label} age_hours={age_hours:.1f} reason={item.reason} path={item.path}")
+        else:
+            report(f"xcode_tmp_mb {mb(item.size)} {label}")
+    if not apply or not candidates:
+        return
+
+    manifest = backup_root / "removed-xcode-temp-builds.jsonl"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    with manifest.open("w", encoding="utf-8") as handle:
+        for item in candidates:
+            record = {
+                "path": str(item.path),
+                "bytes": item.size,
+                "modified_at": int(item.modified_at),
+                "reason": item.reason,
+            }
+            try:
+                if item.path.is_dir():
+                    shutil.rmtree(item.path)
+                else:
+                    item.path.unlink()
+                record["removed"] = True
+                removed += 1
+            except OSError as exc:
+                record["removed"] = False
+                record["error"] = str(exc)
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    report(f"xcode_tmp_removed {removed}")
+    report(f"xcode_tmp_manifest {manifest}")
+
+
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
     files = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
     total = sum(path.stat().st_size for path in files)
@@ -513,7 +640,7 @@ def run(args: argparse.Namespace) -> int:
     elif effective_mode == "backup-only":
         report("mode_safety backup_only=true archives=false state_writes=false")
     else:
-        report("mode_safety backup_first=true archive_only=true permanent_delete=false")
+        report("mode_safety backup_first=true archive_codex_state=true delete_stale_temp_builds=true")
     if args.apply and running:
         report("apply_skipped_codex_running")
         for index, proc in enumerate(running, start=1):
@@ -548,6 +675,7 @@ def run(args: argparse.Namespace) -> int:
 
     prune_config(codex_home, backup_root, effective_apply, effective_backup)
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
+    clean_stale_temp_builds(backup_root, args.xcode_tmp_older_than_hours, effective_apply, args.details)
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
     verify_sizes(codex_home)
     top_node_processes(args.details)
@@ -575,6 +703,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
+    parser.add_argument("--xcode-tmp-older-than-hours", type=int, default=24)
     parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:

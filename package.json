@@ -1,6 +1,6 @@
 {
   "name": "dexrelay",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "Mac-side CLI/bootstrap runtime for the DexRelay iPhone app.",
   "main": "bridge.js",
   "bin": {

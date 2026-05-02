@@ -277,6 +277,8 @@ def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]
     logs_mb = float(metrics.get("logs_mb") or 0)
     config_prune = int(metrics.get("config_prune_candidates") or 0)
     worktrees = int(metrics.get("worktree_candidates") or 0)
+    xcode_tmp = int(metrics.get("xcode_tmp_candidates") or 0)
+    xcode_tmp_gb = float(metrics.get("xcode_tmp_candidate_gb") or 0)
     if old_sessions > 0:
         recommendations.append({
             "title": "Archive old Codex sessions",
@@ -301,10 +303,16 @@ def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]
             "impact": "Keeps old temporary worktrees out of the hot path while preserving them in an archive.",
             "severity": "warn",
         })
+    if xcode_tmp > 0:
+        recommendations.append({
+            "title": "Remove stale iOS build temp folders",
+            "impact": f"Frees scratch space from old DexRelay/Xcode build folders ({xcode_tmp_gb:.2f} GB). Only DexRelay/Codex-named temp folders are considered.",
+            "severity": "warn" if xcode_tmp_gb < 5 else "high",
+        })
     if not recommendations:
         recommendations.append({
-            "title": "Codex local state looks lean",
-            "impact": "No obvious session/log/worktree cleanup candidate was found.",
+            "title": "DexRelay agent state looks lean",
+            "impact": "No obvious session/log/worktree/temp-build cleanup candidate was found.",
             "severity": "ok",
         })
     return recommendations
@@ -321,7 +329,7 @@ def codex_fast_command(mode: str, *, wait_for_codex_exit: bool = False) -> dict[
         if wait_for_codex_exit:
             args += " --wait-for-codex-exit"
     elif mode != "report":
-        return {"ok": False, "error": f"unsupported codex-fast mode: {mode}"}
+        return {"ok": False, "error": f"unsupported agent-speedup mode: {mode}"}
 
     result = run_shell(f"python3 {shlex.quote(str(CODEX_FAST_SCRIPT))} {args}".strip(), timeout=240)
     stdout = str(result.get("stdout", "") or "")
@@ -448,6 +456,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = codex_fast_command("report")
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
+        if parsed.path == "/api/agent-speedup":
+            payload = codex_fast_command("report")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
         if parsed.path == "/api/project-metrics":
             project_path = (query.get("path") or [""])[0]
             if not project_path.strip():
@@ -527,11 +539,23 @@ class Handler(BaseHTTPRequestHandler):
             payload = codex_fast_command("report")
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
+        if parsed.path == "/api/actions/agent-speedup-report":
+            payload = codex_fast_command("report")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
         if parsed.path == "/api/actions/codex-fast-backup":
             payload = codex_fast_command("backup")
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
+        if parsed.path == "/api/actions/agent-speedup-backup":
+            payload = codex_fast_command("backup")
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
         if parsed.path == "/api/actions/codex-fast-apply":
+            payload = codex_fast_command("apply", wait_for_codex_exit=bool(body.get("waitForCodexExit")))
+            self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
+            return
+        if parsed.path == "/api/actions/agent-speedup-apply":
             payload = codex_fast_command("apply", wait_for_codex_exit=bool(body.get("waitForCodexExit")))
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return

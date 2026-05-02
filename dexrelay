@@ -19,7 +19,7 @@ VERSION="${CODEX_RELAY_CLI_VERSION:-}"
 if [[ -z "$VERSION" && -f "$SCRIPT_DIR/package.json" ]]; then
   VERSION="$(sed -n 's/^[[:space:]]*\"version\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$SCRIPT_DIR/package.json" | head -n 1)"
 fi
-VERSION="${VERSION:-0.1.55}"
+VERSION="${VERSION:-0.1.56}"
 DEFAULT_RUNTIME_ROOT="$HOME/Library/Application Support/DexRelay/runtime"
 
 runtime_root_ready() {
@@ -77,6 +77,9 @@ Usage:
   dexrelay wake on
   dexrelay wake off
   dexrelay wake status
+  dexrelay agent-speedup report
+  dexrelay agent-speedup backup
+  dexrelay agent-speedup apply
   dexrelay codex-fast report
   dexrelay codex-fast backup
   dexrelay codex-fast apply
@@ -91,8 +94,10 @@ Commands:
   relay-pair Prepare the relay runtime automatically and print a relay bootstrap QR.
   uninstall Remove the DexRelay runtime, launch agents, logs, and installed DexRelay CLI.
   wake      Control the keep-awake launch agent (on, off, status).
+  agent-speedup
+            Report and safely maintain local agent state and stale iOS temp builds.
   codex-fast
-            Report and safely maintain local Codex session/log state.
+            Legacy alias for agent-speedup.
   doctor    Print the installed payload location and expected runtime paths.
   version   Print the DexRelay CLI wrapper version.
 EOF
@@ -756,7 +761,7 @@ codex_fast_command() {
   shift || true
   local script_path
   if ! script_path="$(codex_fast_script_path)"; then
-    printf 'DexRelay codex-fast script is not installed yet.\n' >&2
+    printf 'DexRelay agent speedup script is not installed yet.\n' >&2
     printf 'Run `dexrelay install` to update the Mac runtime.\n' >&2
     return 1
   fi
@@ -772,8 +777,8 @@ codex_fast_command() {
       python3 "$script_path" --apply "$@"
       ;;
     *)
-      printf 'Unknown codex-fast action: %s\n' "$action" >&2
-      printf 'Usage: dexrelay codex-fast [report|backup|apply]\n' >&2
+      printf 'Unknown agent-speedup action: %s\n' "$action" >&2
+      printf 'Usage: dexrelay agent-speedup [report|backup|apply]\n' >&2
       return 1
       ;;
   esac
@@ -958,7 +963,7 @@ case "$cmd" in
     shift || true
     wake_command "$@"
     ;;
-  codex-fast)
+  agent-speedup|codex-fast)
     shift || true
     codex_fast_command "$@"
     ;;
