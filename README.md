@@ -51,7 +51,6 @@ https://assets.dexrelay.app/governancectl.py
 https://assets.dexrelay.app/services.registry.json
 https://assets.dexrelay.app/servicectl.py
 https://assets.dexrelay.app/rebuild-workspace-services.py
-https://assets.dexrelay.app/migrate-dexrelay-state.py
 https://assets.dexrelay.app/codex-fast.py
 https://assets.dexrelay.app/codex-health-daemon.py
 https://assets.dexrelay.app/setup-guide.html
@@ -128,7 +127,6 @@ If any thread changes:
 - `relay-server.js`
 - `relay-connector.js`
 - `rebuild-workspace-services.py`
-- `migrate-dexrelay-state.py`
 - public setup or skill docs
 
 then the payload, docs, and installable skills must be released together.

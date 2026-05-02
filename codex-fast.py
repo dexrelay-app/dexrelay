@@ -726,6 +726,8 @@ def archive_selected_claude_sessions(
                     record["session_env_to"] = str(session_env_dest)
                 record["archived"] = True
                 moved += 1
+                archived_title = " ".join(item.title.split())[:120]
+                report(f"claude_session_archived session_id={item.session_id} title={archived_title} path={dest}")
             except OSError as exc:
                 record["archived"] = False
                 record["error"] = str(exc)

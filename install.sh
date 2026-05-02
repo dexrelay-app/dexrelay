@@ -80,7 +80,6 @@ LOCAL_GOVERNANCECTL_SOURCE="$LOCAL_PAYLOAD_ROOT/governancectl.py"
 LOCAL_SERVICES_REGISTRY_SOURCE="$LOCAL_PAYLOAD_ROOT/services.registry.json"
 LOCAL_SERVICECTL_SOURCE="$LOCAL_PAYLOAD_ROOT/servicectl.py"
 LOCAL_REBUILD_WORKSPACE_SOURCE="$LOCAL_PAYLOAD_ROOT/rebuild-workspace-services.py"
-LOCAL_MIGRATE_DEXRELAY_SOURCE="$LOCAL_PAYLOAD_ROOT/migrate-dexrelay-state.py"
 LOCAL_XCODE_DEVDIR_SOURCE="$LOCAL_PAYLOAD_ROOT/xcode-devdir.sh"
 LOCAL_RUN_IOS_DEVICE_SOURCE="$LOCAL_PAYLOAD_ROOT/run-ios-device.sh"
 LOCAL_RUN_IOS_ON_PHONE_SOURCE="$LOCAL_PAYLOAD_ROOT/run-ios-on-phone.sh"
@@ -104,7 +103,6 @@ REMOTE_GOVERNANCECTL_SOURCE="$SETUP_BASE_URL/governancectl.py"
 REMOTE_SERVICES_REGISTRY_SOURCE="$SETUP_BASE_URL/services.registry.json"
 REMOTE_SERVICECTL_SOURCE="$SETUP_BASE_URL/servicectl.py"
 REMOTE_REBUILD_WORKSPACE_SOURCE="$SETUP_BASE_URL/rebuild-workspace-services.py"
-REMOTE_MIGRATE_DEXRELAY_SOURCE="$SETUP_BASE_URL/migrate-dexrelay-state.py"
 REMOTE_XCODE_DEVDIR_SOURCE="$SETUP_BASE_URL/xcode-devdir.sh"
 REMOTE_RUN_IOS_DEVICE_SOURCE="$SETUP_BASE_URL/run-ios-device.sh"
 REMOTE_RUN_IOS_ON_PHONE_SOURCE="$SETUP_BASE_URL/run-ios-on-phone.sh"
@@ -473,12 +471,6 @@ install_runtime_scripts() {
     curl -fsSL "$REMOTE_REBUILD_WORKSPACE_SOURCE" -o "$SCRIPTS_DIR/rebuild-workspace-services.py"
   fi
 
-  if [[ -f "$LOCAL_MIGRATE_DEXRELAY_SOURCE" ]]; then
-    cp "$LOCAL_MIGRATE_DEXRELAY_SOURCE" "$SCRIPTS_DIR/migrate-dexrelay-state.py"
-  else
-    curl -fsSL "$REMOTE_MIGRATE_DEXRELAY_SOURCE" -o "$SCRIPTS_DIR/migrate-dexrelay-state.py"
-  fi
-
   if [[ -f "$LOCAL_XCODE_DEVDIR_SOURCE" ]]; then
     cp "$LOCAL_XCODE_DEVDIR_SOURCE" "$SCRIPTS_DIR/xcode-devdir.sh"
   else
@@ -545,24 +537,8 @@ install_runtime_scripts() {
     curl -fsSL "$REMOTE_HEALTH_UI_STYLES_SOURCE" -o "$HEALTH_UI_DIR/styles.css"
   fi
 
-  chmod +x "$SCRIPTS_DIR/create-mac-project.sh" "$SCRIPTS_DIR/git-project-automation.sh" "$SCRIPTS_DIR/governancectl.py" "$SCRIPTS_DIR/servicectl.py" "$SCRIPTS_DIR/rebuild-workspace-services.py" "$SCRIPTS_DIR/migrate-dexrelay-state.py" "$SCRIPTS_DIR/xcode-devdir.sh" "$SCRIPTS_DIR/run-ios-device.sh" "$SCRIPTS_DIR/run-ios-on-phone.sh" "$SCRIPTS_DIR/publish-ios-adhoc-ota.sh" "$SCRIPTS_DIR/prepare-ios-testflight.py" "$SCRIPTS_DIR/codex-fast.py" "$SCRIPTS_DIR/codex-health-daemon.py"
+  chmod +x "$SCRIPTS_DIR/create-mac-project.sh" "$SCRIPTS_DIR/git-project-automation.sh" "$SCRIPTS_DIR/governancectl.py" "$SCRIPTS_DIR/servicectl.py" "$SCRIPTS_DIR/rebuild-workspace-services.py" "$SCRIPTS_DIR/xcode-devdir.sh" "$SCRIPTS_DIR/run-ios-device.sh" "$SCRIPTS_DIR/run-ios-on-phone.sh" "$SCRIPTS_DIR/publish-ios-adhoc-ota.sh" "$SCRIPTS_DIR/prepare-ios-testflight.py" "$SCRIPTS_DIR/codex-fast.py" "$SCRIPTS_DIR/codex-health-daemon.py"
   python3 "$SCRIPTS_DIR/servicectl.py" sync-conf >/dev/null 2>&1 || true
-}
-
-migrate_project_state() {
-  local migration_script="$SCRIPTS_DIR/migrate-dexrelay-state.py"
-  if [[ ! -f "$migration_script" ]]; then
-    warn "DexRelay state migration script is missing from $SCRIPTS_DIR; skipping legacy project state migration."
-    return 0
-  fi
-  if [[ ! -d "$DEFAULT_PROJECTS_ROOT" ]]; then
-    return 0
-  fi
-
-  log "Migrating DexRelay-owned project state from .codex to .dexrelay under $DEFAULT_PROJECTS_ROOT"
-  if ! python3 "$migration_script" "$DEFAULT_PROJECTS_ROOT"; then
-    warn "DexRelay project-state migration reported an error. Existing installs may still need manual cleanup."
-  fi
 }
 
 write_runtime_manifest() {
@@ -1676,7 +1652,6 @@ main() {
   install_bridge_assets
   install_helper_assets
   install_runtime_scripts
-  migrate_project_state
   write_runtime_manifest
   scaffold_admin_project
   write_start_script

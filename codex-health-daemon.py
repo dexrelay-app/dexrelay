@@ -231,6 +231,7 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
     node_processes: list[dict[str, object]] = []
     blocking_processes: list[str] = []
     claude_sessions: list[dict[str, object]] = []
+    archived_claude_sessions: list[dict[str, object]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -260,6 +261,14 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
             except ValueError:
                 pass
             continue
+        if key == "claude_session_archived" and len(parts) >= 2:
+            item: dict[str, object] = {}
+            rest = " ".join(parts[1:])
+            for match in re.finditer(r"(session_id|title|path)=([^=]+?)(?=\s(?:session_id|title|path)=|$)", rest):
+                item[match.group(1)] = match.group(2).strip()
+            if item.get("session_id"):
+                archived_claude_sessions.append(item)
+            continue
         if key == "blocking_process" and len(parts) >= 2:
             blocking_processes.append(" ".join(parts[1:]))
             continue
@@ -280,6 +289,7 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
         "largeSessions": large_sessions,
         "nodeProcesses": node_processes,
         "claudeSessions": claude_sessions,
+        "archivedClaudeSessions": archived_claude_sessions,
         "blockingProcesses": blocking_processes,
     }
 

@@ -15,7 +15,6 @@ Public bootstrap payload for Cloudflare:
 - services.registry.json
 - servicectl.py
 - rebuild-workspace-services.py
-- migrate-dexrelay-state.py
 - xcode-devdir.sh
 - run-ios-device.sh
 - run-ios-on-phone.sh

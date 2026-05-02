@@ -58,6 +58,11 @@ SETUP_LOG = os.path.join(LOG_DIR, "setup.out.log")
 SETUP_ERR_LOG = os.path.join(LOG_DIR, "setup.err.log")
 OTA_PUBLIC_ROOT = os.environ.get("CODEX_RELAY_OTA_PUBLIC_ROOT", os.path.join(STATE_DIR, "ota", "public"))
 HELPER_VERSION = "1.2.0"
+DEXRELAY_CLI_CANDIDATES = [
+    "dexrelay",
+    "/opt/homebrew/bin/dexrelay",
+    "/usr/local/bin/dexrelay",
+]
 PAIRING_TTL_SECONDS = int(os.environ.get("CODEX_RELAY_PAIRING_TTL_SECONDS", "600"))
 RELAY_SERVER_PORT = int(os.environ.get("CODEX_RELAY_SERVER_PORT", "4620"))
 RELAY_SERVER_PATH = os.environ.get("CODEX_RELAY_SERVER_PATH", "/relay").strip() or "/relay"
@@ -575,6 +580,34 @@ def bridge_reachable() -> bool:
         return sock.connect_ex(("127.0.0.1", BRIDGE_PORT)) == 0
 
 
+def detect_dexrelay_cli():
+    for candidate in DEXRELAY_CLI_CANDIDATES:
+        resolved = shutil.which(candidate) if "/" not in candidate else candidate
+        if not resolved or not os.path.exists(resolved) or not os.access(resolved, os.X_OK):
+            continue
+        try:
+            output = subprocess.check_output(
+                [resolved, "version"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            ).strip()
+            parts = output.split()
+            version = parts[-1] if parts and parts[0].lower() == "dexrelay" else None
+            return {
+                "dexRelayCLIPath": resolved,
+                "dexRelayCLIVersion": version,
+                "dexRelayCLIVersionOutput": output,
+            }
+        except Exception:
+            continue
+    return {
+        "dexRelayCLIPath": None,
+        "dexRelayCLIVersion": None,
+        "dexRelayCLIVersionOutput": None,
+    }
+
+
 def launch_agent_loaded(label: str) -> bool:
     uid = str(os.getuid())
     for domain in (f"gui/{uid}", f"user/{uid}"):
@@ -609,6 +642,7 @@ def current_state():
     snapshot["bridgeReachable"] = bridge_reachable()
     snapshot.update(detect_local_network_identity())
     snapshot.update(detect_tailscale_identity())
+    snapshot.update(detect_dexrelay_cli())
     advertised, service_name = ensure_bonjour_advertisement(snapshot)
     snapshot["bonjourAdvertised"] = advertised
     snapshot["bonjourServiceName"] = service_name or None

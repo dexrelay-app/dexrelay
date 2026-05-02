@@ -1,6 +1,6 @@
 {
   "name": "dexrelay",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "description": "Mac-side CLI/bootstrap runtime for the DexRelay iPhone app.",
   "main": "bridge.js",
   "bin": {
@@ -24,7 +24,6 @@
     "helper.py",
     "install.sh",
     "ios_testflight_common.py",
-    "migrate-dexrelay-state.py",
     "og-dexrelay-2x.png",
     "og-dexrelay.png",
     "package.json",
