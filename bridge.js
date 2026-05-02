@@ -1,4 +1,4 @@
-const { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } = require('fs');
 const { execFileSync, spawn } = require('child_process');
 const readline = require('readline');
 const os = require('os');
@@ -1186,6 +1186,106 @@ function listClaudeSessions(params = {}) {
   return { result: { sessions: entries, projectDir } };
 }
 
+function safeClaudeArchiveName(value) {
+  return String(value || 'unknown')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 140) || 'unknown';
+}
+
+function resolveClaudeSessionPath(params = {}) {
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  const requestedPath = typeof params.sessionPath === 'string' ? params.sessionPath.trim() : '';
+  if (requestedPath) {
+    const resolved = path.resolve(requestedPath);
+    const root = path.resolve(projectsRoot);
+    if (!resolved.startsWith(`${root}${path.sep}`) || !resolved.endsWith('.jsonl')) {
+      return { error: `Refusing to archive non-Claude session path: ${requestedPath}` };
+    }
+    return { sessionPath: resolved, projectsRoot };
+  }
+
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId.trim() : '';
+  if (!sessionId) return { error: 'sessionId or sessionPath is required' };
+  if (!existsSync(projectsRoot)) return { error: 'Claude projects folder does not exist' };
+
+  const matches = [];
+  for (const projectName of readdirSync(projectsRoot)) {
+    const projectDir = path.join(projectsRoot, projectName);
+    try {
+      if (!statSync(projectDir).isDirectory()) continue;
+      const candidate = path.join(projectDir, `${sessionId}.jsonl`);
+      if (existsSync(candidate)) matches.push(candidate);
+    } catch (_) {
+      // Ignore unreadable project folders.
+    }
+  }
+  if (matches.length === 0) return { error: `Claude session not found: ${sessionId}` };
+  if (matches.length > 1) return { error: `Claude session id matched multiple files: ${sessionId}` };
+  return { sessionPath: matches[0], projectsRoot };
+}
+
+function archiveClaudeSession(params = {}) {
+  const resolved = resolveClaudeSessionPath(params);
+  if (resolved.error) {
+    return { error: { code: -32602, message: resolved.error } };
+  }
+
+  const sessionPath = resolved.sessionPath;
+  const projectsRoot = resolved.projectsRoot;
+  if (!existsSync(sessionPath)) {
+    return { result: { ok: true, alreadyMissing: true, sessionPath } };
+  }
+
+  const projectDir = path.dirname(sessionPath);
+  const sessionId = path.basename(sessionPath, '.jsonl');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const archiveRoot = path.join(os.homedir(), '.claude', 'archived-dexrelay-sessions', stamp);
+  const projectArchiveDir = path.join(archiveRoot, safeClaudeArchiveName(path.basename(projectDir)));
+  mkdirSync(projectArchiveDir, { recursive: true });
+
+  const moved = [];
+  const archiveJsonlPath = path.join(projectArchiveDir, path.basename(sessionPath));
+  renameSync(sessionPath, archiveJsonlPath);
+  moved.push({ from: sessionPath, to: archiveJsonlPath, type: 'session-jsonl' });
+  sessionHistoryCache.delete(sessionPath);
+
+  const companionDir = path.join(projectDir, sessionId);
+  if (existsSync(companionDir)) {
+    const archiveCompanionPath = path.join(projectArchiveDir, sessionId);
+    renameSync(companionDir, archiveCompanionPath);
+    moved.push({ from: companionDir, to: archiveCompanionPath, type: 'session-folder' });
+  }
+
+  const sessionEnvPath = path.join(os.homedir(), '.claude', 'session-env', sessionId);
+  if (existsSync(sessionEnvPath)) {
+    const archiveSessionEnvPath = path.join(projectArchiveDir, `session-env-${sessionId}`);
+    renameSync(sessionEnvPath, archiveSessionEnvPath);
+    moved.push({ from: sessionEnvPath, to: archiveSessionEnvPath, type: 'session-env' });
+  }
+
+  writeFileSync(
+    path.join(projectArchiveDir, 'dexrelay-archive-manifest.json'),
+    JSON.stringify({
+      archivedAt: new Date().toISOString(),
+      projectsRoot,
+      sessionId,
+      moved,
+    }, null, 2),
+  );
+
+  return {
+    result: {
+      ok: true,
+      sessionId,
+      sessionPath,
+      archiveRoot: projectArchiveDir,
+      moved,
+    },
+  };
+}
+
 function sanitizeClaudeJobID(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return null;
@@ -1676,6 +1776,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
     'local/claude/status',
     'local/claude/models',
     'local/claude/listSessions',
+    'local/claude/archiveSession',
     'local/claude/jobStatus',
     'local/claude/send',
   ].includes(incoming.method)) {
@@ -1705,10 +1806,12 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
                   ? await runClaudeModels()
                   : incoming.method === 'local/claude/listSessions'
                     ? listClaudeSessions(incoming.params || {})
-                    : incoming.method === 'local/claude/jobStatus'
-                      ? claudeJobStatus(incoming.params || {})
-                      : incoming.method === 'local/claude/send'
-                        ? await runClaudeSend(incoming.params || {})
+                    : incoming.method === 'local/claude/archiveSession'
+                      ? archiveClaudeSession(incoming.params || {})
+                      : incoming.method === 'local/claude/jobStatus'
+                        ? claudeJobStatus(incoming.params || {})
+                        : incoming.method === 'local/claude/send'
+                          ? await runClaudeSend(incoming.params || {})
         : await runLocalExec(incoming.params);
   if (client.readyState === WebSocket.OPEN) {
     const payload = {
@@ -1725,6 +1828,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
         'local/claude/status',
         'local/claude/models',
         'local/claude/listSessions',
+        'local/claude/archiveSession',
         'local/claude/jobStatus',
         'local/claude/send',
       ].includes(incoming.method)

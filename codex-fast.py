@@ -51,6 +51,17 @@ class TempBuildCandidate:
     reason: str
 
 
+@dataclass
+class ClaudeSessionCandidate:
+    session_id: str
+    title: str
+    project: str
+    path: Path
+    size: int
+    updated_at: float
+    message_count: int
+
+
 def now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -548,6 +559,182 @@ def clean_stale_temp_builds(backup_root: Path, older_than_hours: int, apply: boo
     report(f"xcode_tmp_manifest {manifest}")
 
 
+def claude_home_from_args(value: str | None) -> Path:
+    if value:
+        return Path(value).expanduser().resolve()
+    override = os.environ.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".claude"
+
+
+def claude_text_from_record(record: dict[str, object]) -> str:
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return " ".join(content.split())
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(str(item["text"]))
+        return " ".join(" ".join(parts).split())
+    return ""
+
+
+def summarize_claude_session(path: Path) -> ClaudeSessionCandidate | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    session_id = path.stem
+    first_user = ""
+    last_user = ""
+    last_assistant = ""
+    message_count = 0
+    updated_at = stat.st_mtime
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raw = ""
+    if len(raw) > 1024 * 1024:
+        raw = raw[-1024 * 1024 :]
+        first_newline = raw.find("\n")
+        if first_newline >= 0:
+            raw = raw[first_newline + 1 :]
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if isinstance(record.get("sessionId"), str) and str(record["sessionId"]).strip():
+            session_id = str(record["sessionId"]).strip()
+        if isinstance(record.get("timestamp"), str):
+            try:
+                updated_at = max(updated_at, datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                pass
+        role = ""
+        message = record.get("message")
+        if isinstance(message, dict) and isinstance(message.get("role"), str):
+            role = str(message["role"])
+        elif isinstance(record.get("type"), str):
+            role = str(record["type"])
+        text = claude_text_from_record(record)
+        if not text:
+            continue
+        message_count += 1
+        if role == "user":
+            first_user = first_user or text
+            last_user = text
+        elif role == "assistant":
+            last_assistant = text
+    title = first_user or last_user or last_assistant or "Claude Code Thread"
+    project = path.parent.name
+    return ClaudeSessionCandidate(
+        session_id=session_id,
+        title=title[:120],
+        project=project,
+        path=path,
+        size=stat.st_size,
+        updated_at=updated_at,
+        message_count=message_count,
+    )
+
+
+def claude_session_candidates(claude_home: Path, older_than_days: int) -> list[ClaudeSessionCandidate]:
+    projects_root = claude_home / "projects"
+    if not projects_root.exists():
+        return []
+    cutoff = time.time() - older_than_days * 24 * 60 * 60
+    candidates: list[ClaudeSessionCandidate] = []
+    for path in projects_root.glob("*/*.jsonl"):
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        summary = summarize_claude_session(path)
+        if summary:
+            candidates.append(summary)
+    candidates.sort(key=lambda item: item.updated_at, reverse=True)
+    return candidates
+
+
+def archive_selected_claude_sessions(
+    claude_home: Path,
+    backup_root: Path,
+    selected_session_ids: list[str],
+    include_all_old: bool,
+    older_than_days: int,
+    apply: bool,
+    details: bool,
+) -> None:
+    candidates = claude_session_candidates(claude_home, older_than_days)
+    total = sum(item.size for item in candidates)
+    report(f"claude_session_candidates {len(candidates)}")
+    report(f"claude_session_candidate_mb {mb(total)}")
+    selected_ids = {item.strip() for item in selected_session_ids if item.strip()}
+    for index, item in enumerate(candidates[:20], start=1):
+        label = f"claude_session_{index:03d}"
+        title = " ".join(item.title.split())[:120]
+        if details:
+            report(f"claude_session_mb {mb(item.size)} {label} session_id={item.session_id} messages={item.message_count} project={item.project} title={title} path={item.path}")
+        else:
+            report(f"claude_session_mb {mb(item.size)} {label} session_id={item.session_id} messages={item.message_count} title={title}")
+    if not apply:
+        return
+    selected = [item for item in candidates if include_all_old or item.session_id in selected_ids or str(item.path) in selected_ids]
+    report(f"claude_sessions_selected {len(selected)}")
+    if not selected:
+        return
+    archive_root = claude_home / "archived-dexrelay-sessions" / now_stamp()
+    manifest = backup_root / "archived-claude-sessions.jsonl"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    with manifest.open("w", encoding="utf-8") as handle:
+        for item in selected:
+            project_archive = archive_root / re.sub(r"[^A-Za-z0-9._-]+", "-", item.project)
+            project_archive.mkdir(parents=True, exist_ok=True)
+            dest = project_archive / item.path.name
+            record = {
+                "session_id": item.session_id,
+                "title": item.title,
+                "from": str(item.path),
+                "to": str(dest),
+                "bytes": item.size,
+                "project": item.project,
+            }
+            try:
+                shutil.move(str(item.path), str(dest))
+                companion = item.path.with_suffix("")
+                if companion.exists() and companion.is_dir():
+                    companion_dest = project_archive / companion.name
+                    shutil.move(str(companion), str(companion_dest))
+                    record["companion_to"] = str(companion_dest)
+                session_env = claude_home / "session-env" / item.session_id
+                if session_env.exists():
+                    session_env_dest = project_archive / f"session-env-{item.session_id}"
+                    shutil.move(str(session_env), str(session_env_dest))
+                    record["session_env_to"] = str(session_env_dest)
+                record["archived"] = True
+                moved += 1
+            except OSError as exc:
+                record["archived"] = False
+                record["error"] = str(exc)
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    report(f"claude_sessions_archived {moved}")
+    report(f"claude_sessions_archive_root {archive_root}")
+    report(f"claude_sessions_manifest {manifest}")
+
+
 def rotate_logs(codex_home: Path, threshold_mb: int, stamp: str, apply: bool) -> None:
     files = [path for path in codex_home.glob("logs_2.sqlite*") if path.is_file()]
     total = sum(path.stat().st_size for path in files)
@@ -609,6 +796,7 @@ def verify_sizes(codex_home: Path) -> None:
 
 def run(args: argparse.Namespace) -> int:
     codex_home = codex_home_from_args(args.codex_home)
+    claude_home = claude_home_from_args(args.claude_home)
     if not codex_home.exists():
         report(f"codex_home_missing {codex_home}")
         return 2
@@ -676,6 +864,15 @@ def run(args: argparse.Namespace) -> int:
     prune_config(codex_home, backup_root, effective_apply, effective_backup)
     move_stale_worktrees(codex_home, backup_root, args.worktree_older_than_days, stamp, effective_apply)
     clean_stale_temp_builds(backup_root, args.xcode_tmp_older_than_hours, effective_apply, args.details)
+    archive_selected_claude_sessions(
+        claude_home,
+        backup_root,
+        args.archive_claude_session,
+        args.archive_all_old_claude_sessions,
+        args.claude_session_older_than_days,
+        effective_apply,
+        args.details,
+    )
     rotate_logs(codex_home, args.rotate_logs_above_mb, stamp, effective_apply)
     verify_sizes(codex_home)
     top_node_processes(args.details)
@@ -700,10 +897,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--wait-for-codex-exit", action="store_true", help="Wait until Codex exits before applying.")
     parser.add_argument("--codex-home", help="Override Codex home. Defaults to CODEX_HOME or ~/.codex.")
+    parser.add_argument("--claude-home", help="Override Claude home. Defaults to CLAUDE_CONFIG_DIR, CLAUDE_HOME, or ~/.claude.")
     parser.add_argument("--backup-root", help="Override backup output folder.")
     parser.add_argument("--archive-older-than-days", type=int, default=10)
     parser.add_argument("--worktree-older-than-days", type=int, default=7)
     parser.add_argument("--xcode-tmp-older-than-hours", type=int, default=24)
+    parser.add_argument("--claude-session-older-than-days", type=int, default=10)
+    parser.add_argument("--archive-claude-session", action="append", default=[], help="Claude session id or path to archive during --apply. Can be repeated.")
+    parser.add_argument("--archive-all-old-claude-sessions", action="store_true", help="Archive every Claude session older than --claude-session-older-than-days during --apply.")
     parser.add_argument("--rotate-logs-above-mb", type=int, default=64)
     args = parser.parse_args(argv)
     if args.apply and args.backup_only:

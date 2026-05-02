@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -229,6 +230,7 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
     large_sessions: list[dict[str, object]] = []
     node_processes: list[dict[str, object]] = []
     blocking_processes: list[str] = []
+    claude_sessions: list[dict[str, object]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -244,6 +246,17 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
         if key == "node_mb" and len(parts) >= 2:
             try:
                 node_processes.append({"mb": float(parts[1]), "process": " ".join(parts[2:]) or "node"})
+            except ValueError:
+                pass
+            continue
+        if key == "claude_session_mb" and len(parts) >= 3:
+            try:
+                item: dict[str, object] = {"mb": float(parts[1]), "label": parts[2]}
+                rest = " ".join(parts[3:])
+                for match in re.finditer(r"(session_id|messages|title|project|path)=([^=]+?)(?=\s(?:session_id|messages|title|project|path)=|$)", rest):
+                    value = match.group(2).strip()
+                    item[match.group(1)] = int(value) if match.group(1) == "messages" and value.isdigit() else value
+                claude_sessions.append(item)
             except ValueError:
                 pass
             continue
@@ -266,6 +279,7 @@ def parse_codex_fast_output(text: str) -> dict[str, object]:
         "metrics": metrics,
         "largeSessions": large_sessions,
         "nodeProcesses": node_processes,
+        "claudeSessions": claude_sessions,
         "blockingProcesses": blocking_processes,
     }
 
@@ -279,6 +293,7 @@ def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]
     worktrees = int(metrics.get("worktree_candidates") or 0)
     xcode_tmp = int(metrics.get("xcode_tmp_candidates") or 0)
     xcode_tmp_gb = float(metrics.get("xcode_tmp_candidate_gb") or 0)
+    claude_sessions = int(metrics.get("claude_session_candidates") or 0)
     if old_sessions > 0:
         recommendations.append({
             "title": "Archive old Codex sessions",
@@ -309,6 +324,12 @@ def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]
             "impact": f"Frees scratch space from old DexRelay/Xcode build folders ({xcode_tmp_gb:.2f} GB). Only DexRelay/Codex-named temp folders are considered.",
             "severity": "warn" if xcode_tmp_gb < 5 else "high",
         })
+    if claude_sessions > 0:
+        recommendations.append({
+            "title": "Review old Claude Code threads",
+            "impact": "Shows concrete Claude thread titles and session IDs. Archive only the threads you select.",
+            "severity": "warn",
+        })
     if not recommendations:
         recommendations.append({
             "title": "DexRelay agent state looks lean",
@@ -318,7 +339,13 @@ def codex_fast_recommendations(parsed: dict[str, object]) -> list[dict[str, str]
     return recommendations
 
 
-def codex_fast_command(mode: str, *, wait_for_codex_exit: bool = False) -> dict[str, object]:
+def codex_fast_command(
+    mode: str,
+    *,
+    wait_for_codex_exit: bool = False,
+    claude_session_ids: list[str] | None = None,
+    archive_all_old_claude_sessions: bool = False,
+) -> dict[str, object]:
     if not CODEX_FAST_SCRIPT.exists():
         return {"ok": False, "error": f"missing {CODEX_FAST_SCRIPT}"}
     args = ""
@@ -330,6 +357,12 @@ def codex_fast_command(mode: str, *, wait_for_codex_exit: bool = False) -> dict[
             args += " --wait-for-codex-exit"
     elif mode != "report":
         return {"ok": False, "error": f"unsupported agent-speedup mode: {mode}"}
+    if mode == "apply":
+        for session_id in claude_session_ids or []:
+            if isinstance(session_id, str) and session_id.strip():
+                args += f" --archive-claude-session {shlex.quote(session_id.strip())}"
+        if archive_all_old_claude_sessions:
+            args += " --archive-all-old-claude-sessions"
 
     result = run_shell(f"python3 {shlex.quote(str(CODEX_FAST_SCRIPT))} {args}".strip(), timeout=240)
     stdout = str(result.get("stdout", "") or "")
@@ -556,7 +589,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
         if parsed.path == "/api/actions/agent-speedup-apply":
-            payload = codex_fast_command("apply", wait_for_codex_exit=bool(body.get("waitForCodexExit")))
+            raw_claude_ids = body.get("claudeSessionIDs")
+            claude_ids = raw_claude_ids if isinstance(raw_claude_ids, list) else []
+            payload = codex_fast_command(
+                "apply",
+                wait_for_codex_exit=bool(body.get("waitForCodexExit")),
+                claude_session_ids=[item for item in claude_ids if isinstance(item, str)],
+                archive_all_old_claude_sessions=bool(body.get("archiveAllOldClaudeSessions")),
+            )
             self._send_json(payload, 200 if bool(payload.get("ok")) else 500)
             return
         if parsed.path.startswith("/api/services/"):
