@@ -44,6 +44,10 @@ let activeBridgeClientID = null;
 let activeBridgeDeviceID = null;
 let activeBridgeClientConnectedAt = 0;
 
+function describeBridgeClient(cid, deviceID = null) {
+  return deviceID ? `${cid} device=${deviceID}` : `${cid} legacy-device`;
+}
+
 function bridgeOwnerIsOpen() {
   return activeBridgeClient &&
     (activeBridgeClient.readyState === WebSocket.OPEN ||
@@ -2834,38 +2838,16 @@ server.on('connection', (client, req) => {
   const clientRole = clientMetadata.role;
   const clientDeviceID = clientMetadata.deviceID;
   const isRelayConnectorClient = clientRole === 'relay-connector';
-  const isSameDirectDevice = Boolean(
-    clientDeviceID &&
-    activeBridgeDeviceID &&
-    clientDeviceID === activeBridgeDeviceID
-  );
   console.log(
     `[${cid}] client connected${clientRole ? ` role=${clientRole}` : ''}` +
     `${clientDeviceID ? ` device=${clientDeviceID}` : ''}`
   );
-  if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client && isSameDirectDevice) {
-    console.log(`[${cid}] replacing previous connection for device ${clientDeviceID}`);
-    try { activeBridgeClient.close(1012, 'same device reconnect'); } catch (_) {}
-  }
   if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
-    console.log(`[${cid}] blocked: bridge owned by ${activeBridgeClientID}`);
-    sendBridgeInUseNotification(client, cid, clientDeviceID);
-    const blockedCloseTimer = setTimeout(() => {
-      if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
-        try { client.close(1013, 'bridge_in_use_by_another_device'); } catch (_) {}
-      }
-    }, 30 * 1000);
-    blockedCloseTimer.unref?.();
-
-    client.on('message', (data, isBinary) => {
-      if (isBinary) return;
-      try {
-        sendBridgeInUseError(client, JSON.parse(data.toString()), cid, clientDeviceID);
-      } catch (_) {}
-    });
-    client.on('close', () => clearTimeout(blockedCloseTimer));
-    client.on('error', () => clearTimeout(blockedCloseTimer));
-    return;
+    console.log(
+      `[${cid}] replacing previous bridge owner ` +
+      `${describeBridgeClient(activeBridgeClientID, activeBridgeDeviceID)} with ${describeBridgeClient(cid, clientDeviceID)}`
+    );
+    try { activeBridgeClient.close(1012, 'newer device connected'); } catch (_) {}
   }
   if (!isRelayConnectorClient) {
     claimBridgeClient(client, cid, clientDeviceID);
