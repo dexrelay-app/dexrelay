@@ -62,7 +62,7 @@ QUIC_GATEWAY_PORT="${CODEX_RELAY_QUIC_PORT:-4617}"
 RUNTIME_MANIFEST_PATH="$INSTALL_ROOT/runtime-manifest.json"
 INSTALL_MODE="${CODEX_RELAY_INSTALL_MODE:-direct-install-script}"
 AUTO_INSTALL="${CODEX_RELAY_AUTO_INSTALL:-0}"
-DEXRELAY_PAYLOAD_VERSION="${CODEX_RELAY_PAYLOAD_VERSION:-0.1.59}"
+DEXRELAY_PAYLOAD_VERSION="${CODEX_RELAY_PAYLOAD_VERSION:-0.1.60}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_INSTALL_SCRIPT="$SCRIPT_DIR/install.sh"
@@ -266,6 +266,25 @@ should_install_tailscale_now() {
   return 0
 }
 
+should_check_tailscale_now() {
+  if [[ "${CODEX_RELAY_CHECK_TAILSCALE:-}" == "1" || "${CODEX_RELAY_INSTALL_TAILSCALE:-}" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${CODEX_RELAY_AUTO_INSTALL:-}" == "1" || "${CODEX_RELAY_INSTALL_MODE:-}" == "npm-postinstall" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+should_configure_tailscale_serve_now() {
+  case "$(printf '%s' "${CODEX_RELAY_CONFIGURE_TAILSCALE_SERVE:-0}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_tailscale_installed() {
   local tailscale_cli=""
   tailscale_cli="$(resolve_tailscale_cli || true)"
@@ -293,6 +312,11 @@ ensure_tailscale_installed() {
 
 ensure_tailscale_connected() {
   local tailscale_cli=""
+  if ! should_check_tailscale_now; then
+    log "Skipping Tailscale connection check during automatic install. Local Wi-Fi pairing does not require Tailscale."
+    return 0
+  fi
+
   tailscale_cli="$(resolve_tailscale_cli || true)"
   if [[ -z "$tailscale_cli" ]]; then
     warn "tailscale CLI not found after install. Run dexrelay repair after confirming Tailscale.app is installed."
@@ -311,6 +335,11 @@ ensure_tailscale_serve_enabled() {
   local tailscale_cli=""
   local serve_status_file=""
   local serve_enable_file=""
+  if ! should_configure_tailscale_serve_now; then
+    log "Skipping Tailscale Serve setup. Set CODEX_RELAY_CONFIGURE_TAILSCALE_SERVE=1 to configure it."
+    return 0
+  fi
+
   tailscale_cli="$(resolve_tailscale_cli || true)"
   if [[ -z "$tailscale_cli" ]]; then
     warn "tailscale CLI not found; skipping Tailscale Serve setup."
