@@ -41,6 +41,7 @@ const server = new WebSocket.Server({ host: LISTEN_HOST, port: LISTEN_PORT, perM
 
 let activeBridgeClient = null;
 let activeBridgeClientID = null;
+let activeBridgeDeviceID = null;
 let activeBridgeClientConnectedAt = 0;
 
 function bridgeOwnerIsOpen() {
@@ -49,29 +50,31 @@ function bridgeOwnerIsOpen() {
       activeBridgeClient.readyState === WebSocket.CONNECTING);
 }
 
-function bridgeInUsePayload(cid) {
+function bridgeInUsePayload(cid, requesterDeviceID = null) {
   return {
     reason: 'bridge_in_use_by_another_device',
     message: 'DexRelay is in use by another device.',
     ownerClientID: activeBridgeClientID,
+    ownerDeviceID: activeBridgeDeviceID,
     requesterClientID: cid,
+    requesterDeviceID,
     ownerConnectedAt: activeBridgeClientConnectedAt,
     ownerAgeMs: activeBridgeClientConnectedAt > 0 ? Date.now() - activeBridgeClientConnectedAt : null,
   };
 }
 
-function sendBridgeInUseNotification(client, cid) {
+function sendBridgeInUseNotification(client, cid, requesterDeviceID = null) {
   if (client.readyState !== WebSocket.OPEN) return;
   client.send(JSON.stringify({
     jsonrpc: '2.0',
     method: 'local/bridgeInUse',
-    params: bridgeInUsePayload(cid),
+    params: bridgeInUsePayload(cid, requesterDeviceID),
   }), { binary: false });
 }
 
-function sendBridgeInUseError(client, incoming, cid) {
+function sendBridgeInUseError(client, incoming, cid, requesterDeviceID = null) {
   if (client.readyState !== WebSocket.OPEN || !Number.isInteger(incoming?.id)) return;
-  const payload = bridgeInUsePayload(cid);
+  const payload = bridgeInUsePayload(cid, requesterDeviceID);
   client.send(JSON.stringify({
     jsonrpc: '2.0',
     id: incoming.id,
@@ -83,9 +86,10 @@ function sendBridgeInUseError(client, incoming, cid) {
   }), { binary: false });
 }
 
-function claimBridgeClient(client, cid) {
+function claimBridgeClient(client, cid, deviceID = null) {
   activeBridgeClient = client;
   activeBridgeClientID = cid;
+  activeBridgeDeviceID = deviceID;
   activeBridgeClientConnectedAt = Date.now();
 }
 
@@ -93,15 +97,19 @@ function releaseBridgeClient(client) {
   if (activeBridgeClient !== client) return;
   activeBridgeClient = null;
   activeBridgeClientID = null;
+  activeBridgeDeviceID = null;
   activeBridgeClientConnectedAt = 0;
 }
 
-function clientRoleForRequest(req) {
+function clientMetadataForRequest(req) {
   try {
     const url = new URL(req.url || '/', 'ws://localhost');
-    return (url.searchParams.get('dexrelayClient') || '').trim();
+    return {
+      role: (url.searchParams.get('dexrelayClient') || '').trim(),
+      deviceID: (url.searchParams.get('dexrelayDeviceId') || '').trim() || null,
+    };
   } catch (_) {
-    return '';
+    return { role: '', deviceID: null };
   }
 }
 
@@ -2822,12 +2830,26 @@ server.on('listening', () => {
 
 server.on('connection', (client, req) => {
   const cid = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
-  const clientRole = clientRoleForRequest(req);
+  const clientMetadata = clientMetadataForRequest(req);
+  const clientRole = clientMetadata.role;
+  const clientDeviceID = clientMetadata.deviceID;
   const isRelayConnectorClient = clientRole === 'relay-connector';
-  console.log(`[${cid}] client connected${clientRole ? ` role=${clientRole}` : ''}`);
+  const isSameDirectDevice = Boolean(
+    clientDeviceID &&
+    activeBridgeDeviceID &&
+    clientDeviceID === activeBridgeDeviceID
+  );
+  console.log(
+    `[${cid}] client connected${clientRole ? ` role=${clientRole}` : ''}` +
+    `${clientDeviceID ? ` device=${clientDeviceID}` : ''}`
+  );
+  if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client && isSameDirectDevice) {
+    console.log(`[${cid}] replacing previous connection for device ${clientDeviceID}`);
+    try { activeBridgeClient.close(1012, 'same device reconnect'); } catch (_) {}
+  }
   if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
     console.log(`[${cid}] blocked: bridge owned by ${activeBridgeClientID}`);
-    sendBridgeInUseNotification(client, cid);
+    sendBridgeInUseNotification(client, cid, clientDeviceID);
     const blockedCloseTimer = setTimeout(() => {
       if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
         try { client.close(1013, 'bridge_in_use_by_another_device'); } catch (_) {}
@@ -2838,7 +2860,7 @@ server.on('connection', (client, req) => {
     client.on('message', (data, isBinary) => {
       if (isBinary) return;
       try {
-        sendBridgeInUseError(client, JSON.parse(data.toString()), cid);
+        sendBridgeInUseError(client, JSON.parse(data.toString()), cid, clientDeviceID);
       } catch (_) {}
     });
     client.on('close', () => clearTimeout(blockedCloseTimer));
@@ -2846,7 +2868,7 @@ server.on('connection', (client, req) => {
     return;
   }
   if (!isRelayConnectorClient) {
-    claimBridgeClient(client, cid);
+    claimBridgeClient(client, cid, clientDeviceID);
   }
   let currentSession = null;
 
@@ -2903,7 +2925,7 @@ server.on('connection', (client, req) => {
     if (isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
       if (!isBinary) {
         try {
-          sendBridgeInUseError(client, JSON.parse(data.toString()), cid);
+          sendBridgeInUseError(client, JSON.parse(data.toString()), cid, clientDeviceID);
         } catch (_) {}
       }
       return;
