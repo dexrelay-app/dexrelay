@@ -25,6 +25,17 @@ function log(message) {
   process.stdout.write(`[relay-connector] ${message}\n`);
 }
 
+function localBridgeURLForConnector() {
+  try {
+    const url = new URL(LOCAL_BRIDGE_URL);
+    url.searchParams.set('dexrelayClient', 'relay-connector');
+    return url.toString();
+  } catch (_) {
+    const separator = LOCAL_BRIDGE_URL.includes('?') ? '&' : '?';
+    return `${LOCAL_BRIDGE_URL}${separator}dexrelayClient=relay-connector`;
+  }
+}
+
 function clearTimers() {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
@@ -107,8 +118,9 @@ function connectLocalBridge() {
   if (localBridgeSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(localBridgeSocket.readyState)) {
     return;
   }
-  log(`connecting to local bridge ${LOCAL_BRIDGE_URL}`);
-  localBridgeSocket = new WebSocket(LOCAL_BRIDGE_URL, { perMessageDeflate: false });
+  const connectorBridgeURL = localBridgeURLForConnector();
+  log(`connecting to local bridge ${connectorBridgeURL}`);
+  localBridgeSocket = new WebSocket(connectorBridgeURL, { perMessageDeflate: false });
 
   localBridgeSocket.on('open', () => {
     localBridgeConnected = true;

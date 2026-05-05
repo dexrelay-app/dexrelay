@@ -82,7 +82,7 @@ Advanced:
 
 Normal user flow should be:
 
-1. run `npm i -g dexrelay`
+1. run `curl -fsSL https://assets.dexrelay.app/install.sh | bash` on a clean Mac, or `npm i -g dexrelay` when npm already works
 2. wait for DexRelay to bootstrap the Mac runtime automatically
 3. on the Mac, run `dexrelay pair`
 4. on the phone, scan the QR
@@ -90,7 +90,7 @@ Normal user flow should be:
 
 Existing users upgrading from an older install should run `dexrelay repair` once so the runtime removes the old default QUIC gateway route and refreshes pairing metadata.
 
-Secondary install path:
+The direct installer is the first-run fallback for users without npm, with a broken npm global prefix, or with `/opt/homebrew/lib/node_modules` permission errors. The npm package cannot repair a missing npm binary because package scripts only run after npm has already started.
 
 Tailscale is not supposed to be the first-run blocker for same-network onboarding anymore.
 

@@ -62,11 +62,12 @@ QUIC_GATEWAY_PORT="${CODEX_RELAY_QUIC_PORT:-4617}"
 RUNTIME_MANIFEST_PATH="$INSTALL_ROOT/runtime-manifest.json"
 INSTALL_MODE="${CODEX_RELAY_INSTALL_MODE:-direct-install-script}"
 AUTO_INSTALL="${CODEX_RELAY_AUTO_INSTALL:-0}"
-DEXRELAY_PAYLOAD_VERSION="${CODEX_RELAY_PAYLOAD_VERSION:-0.1.57}"
+DEXRELAY_PAYLOAD_VERSION="${CODEX_RELAY_PAYLOAD_VERSION:-0.1.59}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_INSTALL_SCRIPT="$SCRIPT_DIR/install.sh"
 LOCAL_PAYLOAD_ROOT="${CODEX_RELAY_LOCAL_PAYLOAD_ROOT:-$SCRIPT_DIR}"
+LOCAL_CLI_SOURCE="$LOCAL_PAYLOAD_ROOT/dexrelay"
 LOCAL_BRIDGE_SOURCE="$LOCAL_PAYLOAD_ROOT/bridge.js"
 LOCAL_RELAY_SERVER_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-server.js"
 LOCAL_RELAY_CONNECTOR_SOURCE="$LOCAL_PAYLOAD_ROOT/relay-connector.js"
@@ -91,6 +92,7 @@ LOCAL_HEALTH_UI_INDEX_SOURCE="$LOCAL_PAYLOAD_ROOT/health-ui-index.html"
 LOCAL_HEALTH_UI_APP_SOURCE="$LOCAL_PAYLOAD_ROOT/health-ui-app.js"
 LOCAL_HEALTH_UI_STYLES_SOURCE="$LOCAL_PAYLOAD_ROOT/health-ui-styles.css"
 REMOTE_BRIDGE_SOURCE="$SETUP_BASE_URL/bridge.js"
+REMOTE_CLI_SOURCE="$SETUP_BASE_URL/dexrelay"
 REMOTE_RELAY_SERVER_SOURCE="$SETUP_BASE_URL/relay-server.js"
 REMOTE_RELAY_CONNECTOR_SOURCE="$SETUP_BASE_URL/relay-connector.js"
 REMOTE_QUIC_GATEWAY_SOURCE="$SETUP_BASE_URL/quic-bridge-gateway.swift"
@@ -429,6 +431,55 @@ install_helper_assets() {
   else
     log "Downloading setup helper from $REMOTE_HELPER_SOURCE"
     curl -fsSL "$REMOTE_HELPER_SOURCE" -o "$HELPER_DIR/helper.py"
+  fi
+}
+
+install_cli_wrapper() {
+  local user_bin_dir="${DEXRELAY_USER_BIN_DIR:-$HOME/.dexrelay/bin}"
+  local user_cli="$user_bin_dir/dexrelay"
+  local dexrelay_already_on_path=0
+  local user_bin_already_on_path=0
+  command_exists dexrelay && dexrelay_already_on_path=1
+  case ":$PATH:" in
+    *":$user_bin_dir:"*) user_bin_already_on_path=1 ;;
+  esac
+  mkdir -p "$BIN_DIR" "$user_bin_dir"
+
+  if [[ -f "$LOCAL_CLI_SOURCE" ]]; then
+    cp "$LOCAL_CLI_SOURCE" "$BIN_DIR/dexrelay"
+  else
+    curl -fsSL "$REMOTE_CLI_SOURCE" -o "$BIN_DIR/dexrelay"
+  fi
+  if [[ -f "$SELF_INSTALL_SCRIPT" ]]; then
+    cp "$SELF_INSTALL_SCRIPT" "$BIN_DIR/install.sh"
+  else
+    curl -fsSL "$SETUP_BASE_URL/install.sh" -o "$BIN_DIR/install.sh"
+  fi
+  chmod +x "$BIN_DIR/dexrelay"
+  chmod +x "$BIN_DIR/install.sh"
+
+  if [[ ! -e "$user_cli" || -L "$user_cli" ]]; then
+    ln -sfn "$BIN_DIR/dexrelay" "$user_cli"
+  elif [[ -w "$user_cli" ]]; then
+    cp "$BIN_DIR/dexrelay" "$user_cli"
+    chmod +x "$user_cli"
+  else
+    warn "Could not update $user_cli. Run $BIN_DIR/dexrelay directly or fix permissions on $user_cli."
+  fi
+
+  export PATH="$user_bin_dir:$PATH"
+
+  if [[ "$dexrelay_already_on_path" == "0" && "$user_bin_already_on_path" == "0" ]]; then
+    local profile="$HOME/.zprofile"
+    local path_line='export PATH="$HOME/.dexrelay/bin:$PATH"'
+    touch "$profile" 2>/dev/null || true
+    if [[ -w "$profile" ]] && ! grep -F "$path_line" "$profile" >/dev/null 2>&1; then
+      {
+        printf '\n# Added by DexRelay installer\n'
+        printf '%s\n' "$path_line"
+      } >>"$profile"
+      log "Added ~/.dexrelay/bin to PATH in ~/.zprofile. Open a new Terminal tab after install."
+    fi
   fi
 }
 
@@ -1609,6 +1660,7 @@ show_next_steps() {
   printf "1. Open the DexRelay iOS app. It should automatically find this Mac on local Wi-Fi.\n"
   printf "2. If it does not appear, tap the Mac/Apple connect icon and use optional QR pairing.\n"
   printf "3. Optional QR: run dexrelay pair, then scan the code from the app.\n"
+  printf "   If your current Terminal says dexrelay is not found, open a new Terminal tab or run ~/.dexrelay/bin/dexrelay pair.\n"
   printf "4. Optional remote access: install Tailscale on your Mac and iPhone for away-from-Wi-Fi use.\n"
   printf "\nUseful commands:\n"
   printf -- "- dexrelay version             Show the installed DexRelay CLI version\n"
@@ -1651,6 +1703,7 @@ main() {
   phase "2/4: installing DexRelay runtime files"
   install_bridge_assets
   install_helper_assets
+  install_cli_wrapper
   install_runtime_scripts
   write_runtime_manifest
   scaffold_admin_project

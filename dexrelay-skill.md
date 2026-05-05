@@ -68,16 +68,16 @@ When setup is already present but broken, the skill should help identify:
 - phone connects on Wi-Fi but not away from home
 - stale setup states that need a clear repair order
 
-## Preferred install command
-
-```bash
-npm i -g dexrelay
-```
-
-Fallback:
+## Preferred install command for clean Macs
 
 ```bash
 curl -fsSL https://assets.dexrelay.app/install.sh | bash
+```
+
+Use npm when npm is already installed and its global prefix is writable:
+
+```bash
+npm i -g dexrelay
 ```
 
 ## Canonical pairing command

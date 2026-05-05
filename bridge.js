@@ -39,6 +39,72 @@ const claudeJobWaiters = new Map();
 
 const server = new WebSocket.Server({ host: LISTEN_HOST, port: LISTEN_PORT, perMessageDeflate: false });
 
+let activeBridgeClient = null;
+let activeBridgeClientID = null;
+let activeBridgeClientConnectedAt = 0;
+
+function bridgeOwnerIsOpen() {
+  return activeBridgeClient &&
+    (activeBridgeClient.readyState === WebSocket.OPEN ||
+      activeBridgeClient.readyState === WebSocket.CONNECTING);
+}
+
+function bridgeInUsePayload(cid) {
+  return {
+    reason: 'bridge_in_use_by_another_device',
+    message: 'DexRelay is in use by another device.',
+    ownerClientID: activeBridgeClientID,
+    requesterClientID: cid,
+    ownerConnectedAt: activeBridgeClientConnectedAt,
+    ownerAgeMs: activeBridgeClientConnectedAt > 0 ? Date.now() - activeBridgeClientConnectedAt : null,
+  };
+}
+
+function sendBridgeInUseNotification(client, cid) {
+  if (client.readyState !== WebSocket.OPEN) return;
+  client.send(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'local/bridgeInUse',
+    params: bridgeInUsePayload(cid),
+  }), { binary: false });
+}
+
+function sendBridgeInUseError(client, incoming, cid) {
+  if (client.readyState !== WebSocket.OPEN || !Number.isInteger(incoming?.id)) return;
+  const payload = bridgeInUsePayload(cid);
+  client.send(JSON.stringify({
+    jsonrpc: '2.0',
+    id: incoming.id,
+    error: {
+      code: -32098,
+      message: `${payload.message} Close DexRelay on the other device, then reconnect here. (bridge_in_use_by_another_device)`,
+      data: payload,
+    },
+  }), { binary: false });
+}
+
+function claimBridgeClient(client, cid) {
+  activeBridgeClient = client;
+  activeBridgeClientID = cid;
+  activeBridgeClientConnectedAt = Date.now();
+}
+
+function releaseBridgeClient(client) {
+  if (activeBridgeClient !== client) return;
+  activeBridgeClient = null;
+  activeBridgeClientID = null;
+  activeBridgeClientConnectedAt = 0;
+}
+
+function clientRoleForRequest(req) {
+  try {
+    const url = new URL(req.url || '/', 'ws://localhost');
+    return (url.searchParams.get('dexrelayClient') || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
 function trimCommandOutput(value, limit = LOCAL_EXEC_OUTPUT_LIMIT) {
   if (typeof value !== 'string' || value.length <= limit) {
     return value;
@@ -1037,6 +1103,16 @@ function summarizeClaudeSessionFile(filePath, stats, fallbackSessionId) {
   };
 }
 
+function shouldExposeClaudeSessionSummary(session) {
+  if (!session || typeof session !== 'object') return false;
+  if (!Number.isFinite(Number(session.messageCount)) || Number(session.messageCount) <= 0) return false;
+  if (typeof session.cwd !== 'string' || !session.cwd.trim()) return false;
+  if (typeof session.sessionPath === 'string' && session.sessionPath.includes(`${path.sep}subagents${path.sep}`)) {
+    return false;
+  }
+  return true;
+}
+
 function extractClaudeText(parsed, stdout) {
   if (!parsed || typeof parsed !== 'object') {
     return stdout.trim();
@@ -1153,7 +1229,7 @@ function listClaudeSessions(params = {}) {
               };
             });
         })
-        .filter((session) => typeof session.cwd === 'string' && session.cwd.trim())
+        .filter(shouldExposeClaudeSessionSummary)
         .sort((left, right) => right.updatedAt - left.updatedAt)
         .slice(0, limit);
     } catch (error) {
@@ -1177,6 +1253,7 @@ function listClaudeSessions(params = {}) {
         const stats = statSync(filePath);
         return summarizeClaudeSessionFile(filePath, stats, name.replace(/\.jsonl$/, ''));
       })
+      .filter(shouldExposeClaudeSessionSummary)
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .slice(0, limit);
   } catch (error) {
@@ -2745,7 +2822,32 @@ server.on('listening', () => {
 
 server.on('connection', (client, req) => {
   const cid = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
-  console.log(`[${cid}] client connected`);
+  const clientRole = clientRoleForRequest(req);
+  const isRelayConnectorClient = clientRole === 'relay-connector';
+  console.log(`[${cid}] client connected${clientRole ? ` role=${clientRole}` : ''}`);
+  if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
+    console.log(`[${cid}] blocked: bridge owned by ${activeBridgeClientID}`);
+    sendBridgeInUseNotification(client, cid);
+    const blockedCloseTimer = setTimeout(() => {
+      if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+        try { client.close(1013, 'bridge_in_use_by_another_device'); } catch (_) {}
+      }
+    }, 30 * 1000);
+    blockedCloseTimer.unref?.();
+
+    client.on('message', (data, isBinary) => {
+      if (isBinary) return;
+      try {
+        sendBridgeInUseError(client, JSON.parse(data.toString()), cid);
+      } catch (_) {}
+    });
+    client.on('close', () => clearTimeout(blockedCloseTimer));
+    client.on('error', () => clearTimeout(blockedCloseTimer));
+    return;
+  }
+  if (!isRelayConnectorClient) {
+    claimBridgeClient(client, cid);
+  }
   let currentSession = null;
 
   const localContext = {
@@ -2798,6 +2900,15 @@ server.on('connection', (client, req) => {
   };
 
   client.on('message', async (data, isBinary) => {
+    if (isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
+      if (!isBinary) {
+        try {
+          sendBridgeInUseError(client, JSON.parse(data.toString()), cid);
+        } catch (_) {}
+      }
+      return;
+    }
+
     if (!isBinary) {
       try {
         const incoming = JSON.parse(data.toString());
@@ -2815,12 +2926,14 @@ server.on('connection', (client, req) => {
   });
 
   client.on('close', () => {
+    releaseBridgeClient(client);
     if (currentSession) {
       currentSession.handleClientDisconnect(client, 'client closed');
     }
   });
 
   client.on('error', (err) => {
+    releaseBridgeClient(client);
     if (currentSession) {
       currentSession.handleClientDisconnect(client, `client error: ${err.message}`);
     }
