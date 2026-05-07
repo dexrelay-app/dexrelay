@@ -13,26 +13,29 @@ const HEARTBEAT_INTERVAL_MS = Number(process.env.RELAY_CONNECTOR_HEARTBEAT_INTER
 const RECONNECT_DELAY_MS = Number(process.env.RELAY_CONNECTOR_RECONNECT_DELAY_MS || 3000);
 
 let relaySocket = null;
-let localBridgeSocket = null;
+const localBridgeSockets = new Map();
 let heartbeatTimer = null;
 let reconnectTimer = null;
-let localBridgeReconnectTimer = null;
+const localBridgeReconnectTimers = new Map();
 let shutdownRequested = false;
 let relayRegistered = false;
-let localBridgeConnected = false;
 
 function log(message) {
   process.stdout.write(`[relay-connector] ${message}\n`);
 }
 
-function localBridgeURLForConnector() {
+function localBridgeURLForConnector(peerKey = '') {
   try {
     const url = new URL(LOCAL_BRIDGE_URL);
     url.searchParams.set('dexrelayClient', 'relay-connector');
+    if (peerKey) {
+      url.searchParams.set('dexrelayRemotePeer', peerKey);
+    }
     return url.toString();
   } catch (_) {
     const separator = LOCAL_BRIDGE_URL.includes('?') ? '&' : '?';
-    return `${LOCAL_BRIDGE_URL}${separator}dexrelayClient=relay-connector`;
+    const remotePeerParam = peerKey ? `&dexrelayRemotePeer=${encodeURIComponent(peerKey)}` : '';
+    return `${LOCAL_BRIDGE_URL}${separator}dexrelayClient=relay-connector${remotePeerParam}`;
   }
 }
 
@@ -45,10 +48,10 @@ function clearTimers() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-  if (localBridgeReconnectTimer) {
-    clearTimeout(localBridgeReconnectTimer);
-    localBridgeReconnectTimer = null;
+  for (const timer of localBridgeReconnectTimers.values()) {
+    clearTimeout(timer);
   }
+  localBridgeReconnectTimers.clear();
 }
 
 function sendRelayJSON(payload) {
@@ -56,9 +59,13 @@ function sendRelayJSON(payload) {
   relaySocket.send(JSON.stringify(payload));
 }
 
-function sendLocalBridgeText(text) {
-  if (!localBridgeSocket || localBridgeSocket.readyState !== WebSocket.OPEN) return false;
-  localBridgeSocket.send(text);
+function sendLocalBridgeText(text, peerKey = 'default', deviceId = '') {
+  const bridge = localBridgeSockets.get(peerKey);
+  if (!bridge?.socket || bridge.socket.readyState !== WebSocket.OPEN) {
+    connectLocalBridge(peerKey, deviceId);
+    return false;
+  }
+  bridge.socket.send(text);
   return true;
 }
 
@@ -71,13 +78,14 @@ function scheduleReconnect(reason) {
   }, RECONNECT_DELAY_MS);
 }
 
-function scheduleLocalBridgeReconnect(reason) {
-  if (shutdownRequested || localBridgeReconnectTimer) return;
-  log(`local bridge reconnect scheduled in ${RECONNECT_DELAY_MS}ms (${reason})`);
-  localBridgeReconnectTimer = setTimeout(() => {
-    localBridgeReconnectTimer = null;
-    connectLocalBridge();
+function scheduleLocalBridgeReconnect(peerKey, deviceId, reason) {
+  if (shutdownRequested || localBridgeReconnectTimers.has(peerKey)) return;
+  log(`local bridge reconnect scheduled in ${RECONNECT_DELAY_MS}ms for ${peerKey} (${reason})`);
+  const timer = setTimeout(() => {
+    localBridgeReconnectTimers.delete(peerKey);
+    connectLocalBridge(peerKey, deviceId);
   }, RECONNECT_DELAY_MS);
+  localBridgeReconnectTimers.set(peerKey, timer);
 }
 
 function startHeartbeat() {
@@ -113,18 +121,22 @@ function relayRegisterPayload() {
   return payload;
 }
 
-function connectLocalBridge() {
-  if (shutdownRequested || localBridgeConnected) return;
-  if (localBridgeSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(localBridgeSocket.readyState)) {
+function connectLocalBridge(peerKey = 'default', deviceId = '') {
+  if (shutdownRequested) return;
+  const existing = localBridgeSockets.get(peerKey);
+  if (existing?.socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.socket.readyState)) {
     return;
   }
-  const connectorBridgeURL = localBridgeURLForConnector();
+  const connectorBridgeURL = localBridgeURLForConnector(peerKey);
   log(`connecting to local bridge ${connectorBridgeURL}`);
-  localBridgeSocket = new WebSocket(connectorBridgeURL, { perMessageDeflate: false });
+  const localBridgeSocket = new WebSocket(connectorBridgeURL, { perMessageDeflate: false });
+  localBridgeSockets.set(peerKey, {
+    socket: localBridgeSocket,
+    deviceId,
+  });
 
   localBridgeSocket.on('open', () => {
-    localBridgeConnected = true;
-    log('local bridge connected');
+    log(`local bridge connected for ${peerKey}`);
   });
 
   localBridgeSocket.on('message', (raw) => {
@@ -133,16 +145,20 @@ function connectLocalBridge() {
       type: 'bridge_frame',
       pairingId: PAIRING_ID,
       fromRole: ROLE,
+      targetPeerKey: peerKey === 'default' ? undefined : peerKey,
+      targetDeviceId: deviceId || undefined,
       payload: text,
     });
   });
 
   localBridgeSocket.on('close', (code, reasonBuffer) => {
     const reason = reasonBuffer ? reasonBuffer.toString('utf8') : '';
-    localBridgeConnected = false;
-    localBridgeSocket = null;
-    log(`local bridge closed (${code}${reason ? `: ${reason}` : ''})`);
-    scheduleLocalBridgeReconnect(`close ${code}`);
+    const current = localBridgeSockets.get(peerKey);
+    if (current?.socket === localBridgeSocket) {
+      localBridgeSockets.delete(peerKey);
+    }
+    log(`local bridge closed for ${peerKey} (${code}${reason ? `: ${reason}` : ''})`);
+    scheduleLocalBridgeReconnect(peerKey, deviceId, `close ${code}`);
   });
 
   localBridgeSocket.on('error', (error) => {
@@ -180,9 +196,10 @@ function handleRelayMessage(raw) {
   case 'bridge_frame': {
     const bridgePayload = typeof payload.payload === 'string' ? payload.payload : '';
     if (!bridgePayload) return;
-    if (!sendLocalBridgeText(bridgePayload)) {
-      log('dropping bridge_frame because local bridge is not connected');
-      connectLocalBridge();
+    const peerKey = String(payload.sourcePeerKey || payload.sourceDeviceId || 'default').trim() || 'default';
+    const deviceId = String(payload.sourceDeviceId || '').trim();
+    if (!sendLocalBridgeText(bridgePayload, peerKey, deviceId)) {
+      log(`dropping bridge_frame because local bridge is not connected for ${peerKey}`);
     }
     return;
   }
@@ -243,11 +260,12 @@ function shutdown() {
       relaySocket.close();
     } catch (_) {}
   }
-  if (localBridgeSocket) {
+  for (const bridge of localBridgeSockets.values()) {
     try {
-      localBridgeSocket.close();
+      bridge.socket.close();
     } catch (_) {}
   }
+  localBridgeSockets.clear();
 }
 
 process.on('SIGINT', shutdown);

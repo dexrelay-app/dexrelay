@@ -39,72 +39,6 @@ const claudeJobWaiters = new Map();
 
 const server = new WebSocket.Server({ host: LISTEN_HOST, port: LISTEN_PORT, perMessageDeflate: false });
 
-let activeBridgeClient = null;
-let activeBridgeClientID = null;
-let activeBridgeDeviceID = null;
-let activeBridgeClientConnectedAt = 0;
-
-function describeBridgeClient(cid, deviceID = null) {
-  return deviceID ? `${cid} device=${deviceID}` : `${cid} legacy-device`;
-}
-
-function bridgeOwnerIsOpen() {
-  return activeBridgeClient &&
-    (activeBridgeClient.readyState === WebSocket.OPEN ||
-      activeBridgeClient.readyState === WebSocket.CONNECTING);
-}
-
-function bridgeInUsePayload(cid, requesterDeviceID = null) {
-  return {
-    reason: 'bridge_in_use_by_another_device',
-    message: 'DexRelay is in use by another device.',
-    ownerClientID: activeBridgeClientID,
-    ownerDeviceID: activeBridgeDeviceID,
-    requesterClientID: cid,
-    requesterDeviceID,
-    ownerConnectedAt: activeBridgeClientConnectedAt,
-    ownerAgeMs: activeBridgeClientConnectedAt > 0 ? Date.now() - activeBridgeClientConnectedAt : null,
-  };
-}
-
-function sendBridgeInUseNotification(client, cid, requesterDeviceID = null) {
-  if (client.readyState !== WebSocket.OPEN) return;
-  client.send(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'local/bridgeInUse',
-    params: bridgeInUsePayload(cid, requesterDeviceID),
-  }), { binary: false });
-}
-
-function sendBridgeInUseError(client, incoming, cid, requesterDeviceID = null) {
-  if (client.readyState !== WebSocket.OPEN || !Number.isInteger(incoming?.id)) return;
-  const payload = bridgeInUsePayload(cid, requesterDeviceID);
-  client.send(JSON.stringify({
-    jsonrpc: '2.0',
-    id: incoming.id,
-    error: {
-      code: -32098,
-      message: `${payload.message} Close DexRelay on the other device, then reconnect here. (bridge_in_use_by_another_device)`,
-      data: payload,
-    },
-  }), { binary: false });
-}
-
-function claimBridgeClient(client, cid, deviceID = null) {
-  activeBridgeClient = client;
-  activeBridgeClientID = cid;
-  activeBridgeDeviceID = deviceID;
-  activeBridgeClientConnectedAt = Date.now();
-}
-
-function releaseBridgeClient(client) {
-  if (activeBridgeClient !== client) return;
-  activeBridgeClient = null;
-  activeBridgeClientID = null;
-  activeBridgeDeviceID = null;
-  activeBridgeClientConnectedAt = 0;
-}
-
 function clientMetadataForRequest(req) {
   try {
     const url = new URL(req.url || '/', 'ws://localhost');
@@ -2837,21 +2771,10 @@ server.on('connection', (client, req) => {
   const clientMetadata = clientMetadataForRequest(req);
   const clientRole = clientMetadata.role;
   const clientDeviceID = clientMetadata.deviceID;
-  const isRelayConnectorClient = clientRole === 'relay-connector';
   console.log(
     `[${cid}] client connected${clientRole ? ` role=${clientRole}` : ''}` +
     `${clientDeviceID ? ` device=${clientDeviceID}` : ''}`
   );
-  if (!isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
-    console.log(
-      `[${cid}] replacing previous bridge owner ` +
-      `${describeBridgeClient(activeBridgeClientID, activeBridgeDeviceID)} with ${describeBridgeClient(cid, clientDeviceID)}`
-    );
-    try { activeBridgeClient.close(1012, 'newer device connected'); } catch (_) {}
-  }
-  if (!isRelayConnectorClient) {
-    claimBridgeClient(client, cid, clientDeviceID);
-  }
   let currentSession = null;
 
   const localContext = {
@@ -2904,15 +2827,6 @@ server.on('connection', (client, req) => {
   };
 
   client.on('message', async (data, isBinary) => {
-    if (isRelayConnectorClient && bridgeOwnerIsOpen() && activeBridgeClient !== client) {
-      if (!isBinary) {
-        try {
-          sendBridgeInUseError(client, JSON.parse(data.toString()), cid, clientDeviceID);
-        } catch (_) {}
-      }
-      return;
-    }
-
     if (!isBinary) {
       try {
         const incoming = JSON.parse(data.toString());
@@ -2930,14 +2844,12 @@ server.on('connection', (client, req) => {
   });
 
   client.on('close', () => {
-    releaseBridgeClient(client);
     if (currentSession) {
       currentSession.handleClientDisconnect(client, 'client closed');
     }
   });
 
   client.on('error', (err) => {
-    releaseBridgeClient(client);
     if (currentSession) {
       currentSession.handleClientDisconnect(client, `client error: ${err.message}`);
     }

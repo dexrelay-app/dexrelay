@@ -80,6 +80,22 @@ function getPairingState(pairingId) {
   return state;
 }
 
+function peerKeyFor(role, deviceId) {
+  const normalizedRole = String(role || '').trim();
+  const normalizedDeviceID = String(deviceId || '').trim();
+  return normalizedRole === 'ios_client'
+    ? `${normalizedRole}:${normalizedDeviceID}`
+    : normalizedRole;
+}
+
+function peersForRole(state, role) {
+  return Array.from(state.peers.values()).filter((peer) => peer.role === role);
+}
+
+function firstPeerForRole(state, role) {
+  return peersForRole(state, role)[0] || null;
+}
+
 function registerSocketForPairing(socket, payload) {
   const role = String(payload.role || '').trim();
   const pairingId = String(payload.pairingId || '').trim();
@@ -126,20 +142,27 @@ function registerSocketForPairing(socket, payload) {
     return;
   }
 
-  const existingRolePeer = state.peers.get(role);
-  if (existingRolePeer && existingRolePeer.socket !== socket) {
-    if (role === 'ios_client') {
-      sendError(socket, 'role_in_use', `an ${role} peer is already connected for pairing ${pairingId}`);
-      socket.close(4009, 'role in use');
-      return;
-    }
+  const peerKey = peerKeyFor(role, deviceId);
+  const existingPeer = state.peers.get(peerKey);
+  if (existingPeer && existingPeer.socket !== socket) {
     try {
-      sendError(existingRolePeer.socket, 'peer_replaced', `new ${role} peer registered for pairing ${pairingId}`);
-      existingRolePeer.socket.close(4009, 'peer replaced');
+      sendError(existingPeer.socket, 'peer_replaced', `new ${role} peer registered for pairing ${pairingId}`);
+      existingPeer.socket.close(4009, 'peer replaced');
     } catch (_) {}
+  }
+  if (role !== 'ios_client') {
+    const existingRolePeer = firstPeerForRole(state, role);
+    if (existingRolePeer && existingRolePeer.socket !== socket && existingRolePeer !== existingPeer) {
+      state.peers.delete(existingRolePeer.peerKey);
+      try {
+        sendError(existingRolePeer.socket, 'peer_replaced', `new ${role} peer registered for pairing ${pairingId}`);
+        existingRolePeer.socket.close(4009, 'peer replaced');
+      } catch (_) {}
+    }
   }
 
   socket.meta = {
+    peerKey,
     role,
     pairingId,
     deviceId,
@@ -148,8 +171,9 @@ function registerSocketForPairing(socket, payload) {
     lastSeenAt: Date.now(),
   };
 
-  state.peers.set(role, {
+  state.peers.set(peerKey, {
     socket,
+    peerKey,
     role,
     deviceId,
     displayName,
@@ -162,6 +186,7 @@ function registerSocketForPairing(socket, payload) {
     message: `Relay control plane ready for pairing ${pairingId}`,
     role,
     pairingId,
+    peerKey,
     peers: describePeers(state),
   });
   sendJSON(socket, {
@@ -169,6 +194,7 @@ function registerSocketForPairing(socket, payload) {
     message: `${role} registered on relay scaffold`,
     role,
     pairingId,
+    peerKey,
     peers: describePeers(state),
   });
   broadcastPairingState(pairingId, `${role} connected`);
@@ -176,6 +202,7 @@ function registerSocketForPairing(socket, payload) {
 
 function describePeers(state) {
   return Array.from(state.peers.values()).map((peer) => ({
+    peerKey: peer.peerKey,
     role: peer.role,
     deviceId: peer.deviceId,
     displayName: peer.displayName,
@@ -201,16 +228,18 @@ function broadcastPairingState(pairingId, message) {
 function maybeBroadcastReady(pairingId) {
   const state = pairings.get(pairingId);
   if (!state) return;
-  const iosPeer = state.peers.get('ios_client');
-  const macPeer = state.peers.get('mac_connector');
-  if (!iosPeer || !macPeer) return;
+  const iosPeers = peersForRole(state, 'ios_client');
+  const macPeer = firstPeerForRole(state, 'mac_connector');
+  if (iosPeers.length === 0 || !macPeer) return;
   const payload = {
     type: 'bridge_ready',
     pairingId,
     message: 'Relay bridge path is ready',
     peers: describePeers(state),
   };
-  sendJSON(iosPeer.socket, payload);
+  for (const iosPeer of iosPeers) {
+    sendJSON(iosPeer.socket, payload);
+  }
   sendJSON(macPeer.socket, payload);
 }
 
@@ -220,9 +249,9 @@ function removeSocket(socket) {
   if (!meta?.pairingId || !meta.role) return;
   const state = pairings.get(meta.pairingId);
   if (!state) return;
-  const current = state.peers.get(meta.role);
+  const current = state.peers.get(meta.peerKey || peerKeyFor(meta.role, meta.deviceId));
   if (current?.socket === socket) {
-    state.peers.delete(meta.role);
+    state.peers.delete(current.peerKey);
   }
   if (state.peers.size === 0) {
     pairings.delete(meta.pairingId);
@@ -260,19 +289,61 @@ function handleFrame(socket, text) {
       sendError(socket, 'pairing_unknown', 'pairing is not active on this relay');
       return;
     }
-    const targetRole = role === 'ios_client' ? 'mac_connector' : 'ios_client';
-    const targetPeer = state.peers.get(targetRole);
-    if (!targetPeer) {
-      sendError(socket, 'peer_unavailable', `${targetRole} is not connected yet`);
+    const bridgePayload = typeof payload.payload === 'string' ? payload.payload : '';
+    if (role === 'ios_client') {
+      const targetPeer = firstPeerForRole(state, 'mac_connector');
+      if (!targetPeer) {
+        sendError(socket, 'peer_unavailable', 'mac_connector is not connected yet');
+        return;
+      }
+      sendJSON(targetPeer.socket, {
+        type: 'bridge_frame',
+        pairingId,
+        fromRole: role,
+        sourcePeerKey: socket.meta.peerKey,
+        sourceDeviceId: socket.meta.deviceId,
+        payload: bridgePayload,
+      });
       return;
     }
-    const forwarded = {
-      type: 'bridge_frame',
-      pairingId,
-      fromRole: role,
-      payload: typeof payload.payload === 'string' ? payload.payload : '',
-    };
-    sendJSON(targetPeer.socket, forwarded);
+
+    const targetPeerKey = String(payload.targetPeerKey || '').trim();
+    const targetDeviceID = String(payload.targetDeviceId || payload.targetDeviceID || '').trim();
+    let targetPeer = targetPeerKey ? state.peers.get(targetPeerKey) : null;
+    if (!targetPeer && targetDeviceID) {
+      targetPeer = state.peers.get(peerKeyFor('ios_client', targetDeviceID));
+    }
+    if (targetPeer) {
+      sendJSON(targetPeer.socket, {
+        type: 'bridge_frame',
+        pairingId,
+        fromRole: role,
+        sourcePeerKey: socket.meta.peerKey,
+        sourceDeviceId: socket.meta.deviceId,
+        targetPeerKey: targetPeer.peerKey,
+        targetDeviceId: targetPeer.deviceId,
+        payload: bridgePayload,
+      });
+      return;
+    }
+
+    const iosPeers = peersForRole(state, 'ios_client');
+    if (iosPeers.length === 0) {
+      sendError(socket, 'peer_unavailable', 'ios_client is not connected yet');
+      return;
+    }
+    for (const iosPeer of iosPeers) {
+      sendJSON(iosPeer.socket, {
+        type: 'bridge_frame',
+        pairingId,
+        fromRole: role,
+        sourcePeerKey: socket.meta.peerKey,
+        sourceDeviceId: socket.meta.deviceId,
+        targetPeerKey: iosPeer.peerKey,
+        targetDeviceId: iosPeer.deviceId,
+        payload: bridgePayload,
+      });
+    }
     break;
   }
   case 'heartbeat':
