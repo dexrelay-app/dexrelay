@@ -126,6 +126,8 @@ if [[ -z "$TITLE" ]]; then
   TITLE="$SCHEME"
 fi
 
+CHANGE_NOTE="${CODEX_OTA_CHANGE_NOTE:-${OTA_CHANGE_NOTE:-}}"
+
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
@@ -202,6 +204,17 @@ PUBLIC_RELEASES_ROOT="$PUBLIC_PROJECT_ROOT/releases"
 PUBLIC_LATEST_ROOT="$PUBLIC_PROJECT_ROOT/latest"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+BUILT_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILT_HUMAN="$(date '+%b %e, %Y %l:%M %p %Z')"
+CHANGE_NOTE_HTML="$(python3 - <<'PY' "$CHANGE_NOTE"
+import html
+import sys
+print(html.escape(sys.argv[1]))
+PY
+)"
+if [[ -z "$CHANGE_NOTE_HTML" ]]; then
+  CHANGE_NOTE_HTML="No change note provided."
+fi
 mkdir -p "$DERIVED_DATA_ROOT"
 mkdir -p "$SPM_CACHE_DIR"
 DERIVED_DATA="$DERIVED_DATA_ROOT/$SLUG"
@@ -592,11 +605,25 @@ cat >"$RELEASE_PUBLIC_DIR/index.html" <<EOF
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
   </style>
+  <script>
+    function renderAge() {
+      document.querySelectorAll('[data-built-at]').forEach(function (node) {
+        var then = new Date(node.getAttribute('data-built-at')).getTime();
+        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
+        node.textContent = value;
+      });
+    }
+    window.addEventListener('load', renderAge);
+  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p>Archived build: $TIMESTAMP</p>
+  <p><strong>Archived build:</strong> $TIMESTAMP</p>
+  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
+  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
   <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="itms-services://?action=download-manifest&url=$RELEASE_MANIFEST_URL">Install this build</a></p>
   <p>Manifest: <code>$RELEASE_MANIFEST_URL</code></p>
@@ -616,11 +643,25 @@ cat >"$PUBLIC_LATEST_ROOT/index.html" <<EOF
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
   </style>
+  <script>
+    function renderAge() {
+      document.querySelectorAll('[data-built-at]').forEach(function (node) {
+        var then = new Date(node.getAttribute('data-built-at')).getTime();
+        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
+        node.textContent = value;
+      });
+    }
+    window.addEventListener('load', renderAge);
+  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p>Latest good build alias.</p>
+  <p><strong>Latest build:</strong> $TIMESTAMP</p>
+  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
+  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
   <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
   <p>Manifest: <code>$MANIFEST_URL</code></p>
@@ -646,10 +687,25 @@ cat >"$PUBLIC_PROJECT_ROOT/index.html" <<EOF
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
   </style>
+  <script>
+    function renderAge() {
+      document.querySelectorAll('[data-built-at]').forEach(function (node) {
+        var then = new Date(node.getAttribute('data-built-at')).getTime();
+        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
+        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
+        node.textContent = value;
+      });
+    }
+    window.addEventListener('load', renderAge);
+  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
+  <p><strong>Latest build:</strong> $TIMESTAMP</p>
+  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
+  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
   <p>Open this page in Safari on the target iPhone, then tap install. This is not public app distribution: the IPA was built and signed on the developer's Mac, and iOS only installs it on devices included in the Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
   <p>Latest manifest: <code>$MANIFEST_URL</code></p>
