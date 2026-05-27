@@ -1511,10 +1511,11 @@ function runClaudeSend(params = {}) {
     const threadId = typeof params.threadId === 'string' && params.threadId.trim() ? params.threadId.trim() : null;
     const requestedJobID = sanitizeClaudeJobID(params.jobId);
     const jobId = requestedJobID || createClaudeJobID();
-    const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 600000;
-    const inactivityTimeoutMs = Number.isFinite(params.inactivityTimeoutMs)
+    const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 1200000;
+    const requestedInactivityTimeoutMs = Number.isFinite(params.inactivityTimeoutMs)
       ? Number(params.inactivityTimeoutMs)
-      : 180000;
+      : 600000;
+    const inactivityTimeoutMs = Math.max(600000, requestedInactivityTimeoutMs);
     const permissionMode = typeof params.permissionMode === 'string' && params.permissionMode.trim()
       ? params.permissionMode.trim()
       : 'default';

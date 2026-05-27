@@ -126,14 +126,43 @@ if [[ -z "$TITLE" ]]; then
   TITLE="$SCHEME"
 fi
 
-CHANGE_NOTE="${CODEX_OTA_CHANGE_NOTE:-${OTA_CHANGE_NOTE:-}}"
-
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+default_slug_suffix() {
+  if [[ "$METHOD" == "debugging" ]]; then
+    printf '%s' "debug"
+  else
+    printf '%s' "dist"
+  fi
+}
+
+first_existing_ota_slug() {
+  local candidate
+  for candidate in "$@"; do
+    [[ -n "$candidate" ]] || continue
+    if [[ -f "$OTA_PUBLIC_ROOT/$candidate/latest/manifest.plist" || -d "$OTA_PUBLIC_ROOT/$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ -z "$SLUG" ]]; then
-  SLUG="$(slugify "$SCHEME")"
+  SLUG_BASE="$(slugify "$SCHEME")"
+  SLUG_COMPACT_BASE="${SLUG_BASE//-/}"
+  SLUG_SUFFIX="$(default_slug_suffix)"
+  SUFFIXED_SLUG="$SLUG_BASE-$SLUG_SUFFIX"
+  COMPACT_SUFFIXED_SLUG=""
+  if [[ -n "$SLUG_COMPACT_BASE" && "$SLUG_COMPACT_BASE" != "$SLUG_BASE" ]]; then
+    COMPACT_SUFFIXED_SLUG="$SLUG_COMPACT_BASE-$SLUG_SUFFIX"
+  fi
+  SLUG="$(first_existing_ota_slug "$COMPACT_SUFFIXED_SLUG" "$SUFFIXED_SLUG" "$SLUG_BASE" "$SLUG_COMPACT_BASE" || true)"
+  if [[ -z "$SLUG" ]]; then
+    SLUG="$SUFFIXED_SLUG"
+  fi
 fi
 
 SIGNING_CONTEXT_JSON=""
@@ -204,17 +233,6 @@ PUBLIC_RELEASES_ROOT="$PUBLIC_PROJECT_ROOT/releases"
 PUBLIC_LATEST_ROOT="$PUBLIC_PROJECT_ROOT/latest"
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-BUILT_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-BUILT_HUMAN="$(date '+%b %e, %Y %l:%M %p %Z')"
-CHANGE_NOTE_HTML="$(python3 - <<'PY' "$CHANGE_NOTE"
-import html
-import sys
-print(html.escape(sys.argv[1]))
-PY
-)"
-if [[ -z "$CHANGE_NOTE_HTML" ]]; then
-  CHANGE_NOTE_HTML="No change note provided."
-fi
 mkdir -p "$DERIVED_DATA_ROOT"
 mkdir -p "$SPM_CACHE_DIR"
 DERIVED_DATA="$DERIVED_DATA_ROOT/$SLUG"
@@ -576,6 +594,22 @@ if [[ -z "$IPA_PATH" || ! -f "$MANIFEST_PATH" ]]; then
 fi
 
 RELEASE_PUBLIC_DIR="$PUBLIC_RELEASES_ROOT/$TIMESTAMP"
+PREVIOUS_BUILD_COMMIT=""
+if [[ -f "$PUBLIC_LATEST_ROOT/build-metadata.json" ]]; then
+  PREVIOUS_BUILD_COMMIT="$(python3 - <<'PY' "$PUBLIC_LATEST_ROOT/build-metadata.json"
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    data = {}
+
+print((data.get("git") or {}).get("commit", "") or "")
+PY
+)"
+fi
 mkdir -p "$RELEASE_PUBLIC_DIR"
 rm -rf "$PUBLIC_LATEST_ROOT"
 mkdir -p "$PUBLIC_LATEST_ROOT"
@@ -594,6 +628,254 @@ for path in sys.argv[1:]:
     pathlib.Path(path).write_bytes(png)
 PY
 
+BUILD_PUBLISHED_AT_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+BUILD_PUBLISHED_AT_LABEL="$(date +"%b %e, %Y %l:%M %p %Z" | sed 's/  / /g')"
+BUILD_FRESHNESS_HTML="<p class=\"freshness\">Built <span data-built-at=\"$BUILD_PUBLISHED_AT_ISO\">just now</span> · $BUILD_PUBLISHED_AT_LABEL · archive <code>$TIMESTAMP</code></p>"
+BUILD_PAGE_CSS='
+    .build-card { border: 1px solid #e6e6e6; border-radius: 14px; padding: 16px; margin: 18px 0; background: #fafafa; }
+    .build-card h2 { font-size: 1.05rem; margin: 0 0 8px; }
+    .build-meta { color: #555; font-size: 0.95rem; margin: 6px 0; }
+    .commit-list { padding-left: 20px; margin: 10px 0 0; }
+    .commit-list li { margin: 6px 0; }
+    .archive-list { padding-left: 20px; }
+    .archive-list li { margin: 10px 0; }
+    .archive-meta { color: #666; font-size: 0.92rem; }'
+BUILD_FRESHNESS_SCRIPT='<script>
+(() => {
+  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  const units = [
+    ["year", 31536000000],
+    ["month", 2592000000],
+    ["week", 604800000],
+    ["day", 86400000],
+    ["hour", 3600000],
+    ["minute", 60000],
+    ["second", 1000],
+  ];
+  const render = () => {
+    document.querySelectorAll("[data-built-at]").forEach((node) => {
+      const timestamp = Date.parse(node.dataset.builtAt);
+      if (!Number.isFinite(timestamp)) return;
+      const delta = timestamp - Date.now();
+      const abs = Math.abs(delta);
+      const [unit, ms] = units.find(([, size]) => abs >= size) || units[units.length - 1];
+      node.textContent = rtf.format(Math.round(delta / ms), unit);
+    });
+  };
+  render();
+  setInterval(render, 30000);
+})();
+</script>'
+
+BUILD_DETAILS_HTML_FILE="$RELEASE_PUBLIC_DIR/build-details.html"
+HISTORY_ITEMS_HTML_FILE="$RELEASE_DIR/history-items.html"
+python3 - <<'PY' "$PROJECT" "$PREVIOUS_BUILD_COMMIT" "$BUILD_PUBLISHED_AT_ISO" "$BUILD_PUBLISHED_AT_LABEL" "$TIMESTAMP" "$METHOD" "$CONFIGURATION" "$SCHEME" "$SLUG" "$TITLE" "$RELEASE_PUBLIC_DIR" "$PUBLIC_LATEST_ROOT" "$PUBLIC_RELEASES_ROOT" "$BUILD_DETAILS_HTML_FILE" "$HISTORY_ITEMS_HTML_FILE"
+import html
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+(
+    project,
+    previous_commit,
+    built_at_iso,
+    built_at_label,
+    archive_id,
+    method,
+    configuration,
+    scheme,
+    slug,
+    title,
+    release_public_dir,
+    latest_public_dir,
+    releases_root,
+    details_html_file,
+    history_items_html_file,
+) = sys.argv[1:]
+
+release_public_dir = Path(release_public_dir)
+latest_public_dir = Path(latest_public_dir)
+releases_root = Path(releases_root)
+details_html_file = Path(details_html_file)
+history_items_html_file = Path(history_items_html_file)
+
+def run_git(worktree, *args):
+    if not worktree:
+        return ""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", worktree, *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return ""
+
+def git_returncode(worktree, *args):
+    if not worktree:
+        return 1
+    try:
+        return subprocess.run(
+            ["git", "-C", worktree, *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+    except Exception:
+        return 1
+
+def git_worktree_for_project(project_path):
+    project_dir = Path(project_path).expanduser()
+    if project_dir.is_file():
+        project_dir = project_dir.parent
+    try:
+        project_dir = project_dir.resolve()
+    except Exception:
+        pass
+    return run_git(str(project_dir), "rev-parse", "--show-toplevel")
+
+def parse_commits(raw):
+    commits = []
+    for line in raw.splitlines():
+        parts = line.split("\x00")
+        if len(parts) != 4:
+            continue
+        commits.append(
+            {
+                "short": parts[0],
+                "subject": parts[1],
+                "author": parts[2],
+                "date": parts[3],
+            }
+        )
+    return commits
+
+def load_metadata(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return {}
+
+def commit_history_html(commits, previous, head):
+    if not head:
+        return "<p class=\"build-meta\">Git metadata was not available for this build.</p>"
+    if not commits and previous == head:
+        return "<p class=\"build-meta\">No source commits since the previous published build.</p>"
+    if not commits:
+        return "<p class=\"build-meta\">No commit list was available for this build.</p>"
+
+    items = []
+    for commit in commits:
+        short = html.escape(commit.get("short", ""))
+        subject = html.escape(commit.get("subject", ""))
+        author = html.escape(commit.get("author", ""))
+        items.append(f"<li><code>{short}</code> {subject} <span class=\"archive-meta\">{author}</span></li>")
+    return "<ul class=\"commit-list\">\n" + "\n".join(items) + "\n</ul>"
+
+def details_html(metadata):
+    git = metadata.get("git") or {}
+    previous = git.get("previousPublishedCommit") or ""
+    head = git.get("commit") or ""
+    branch = git.get("branch") or "unknown"
+    dirty = "yes" if git.get("dirty") else "no"
+    range_label = git.get("rangeLabel") or "Build commits"
+    commits = git.get("commits") or []
+
+    head_short = html.escape(head[:8] if head else "unknown")
+    branch_text = html.escape(branch)
+    range_text = html.escape(range_label)
+    previous_text = html.escape(previous[:8] if previous else "none")
+    archive_text = html.escape(metadata.get("archiveID") or "")
+    method_text = html.escape(metadata.get("method") or "")
+    configuration_text = html.escape(metadata.get("configuration") or "")
+
+    return f"""<section class=\"build-card\">
+  <h2>Build Details</h2>
+  <p class=\"build-meta\">Built <span data-built-at=\"{html.escape(metadata.get("builtAt") or "")}\">just now</span> · {html.escape(metadata.get("builtAtLabel") or "")} · archive <code>{archive_text}</code></p>
+  <p class=\"build-meta\">Commit <code>{head_short}</code> on <code>{branch_text}</code> · previous published <code>{previous_text}</code> · dirty tracked tree: <code>{dirty}</code></p>
+  <p class=\"build-meta\">Scheme <code>{html.escape(metadata.get("scheme") or "")}</code> · configuration <code>{configuration_text}</code> · export <code>{method_text}</code></p>
+  <h2>{range_text}</h2>
+  {commit_history_html(commits, previous, head)}
+</section>"""
+
+worktree = git_worktree_for_project(project)
+head = run_git(worktree, "rev-parse", "HEAD")
+branch = run_git(worktree, "branch", "--show-current") or run_git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
+subject = run_git(worktree, "log", "-1", "--pretty=%s")
+dirty = bool(run_git(worktree, "status", "--porcelain", "--untracked-files=no"))
+
+previous_commit = previous_commit.strip()
+range_label = "Recent commits in this build"
+log_args = ["log", "-n", "20", "--pretty=format:%h%x00%s%x00%an%x00%aI"]
+
+if head and previous_commit:
+    previous_exists = git_returncode(worktree, "cat-file", "-e", f"{previous_commit}^{{commit}}") == 0
+    if previous_exists:
+        if previous_commit == head:
+            log_args = []
+            range_label = "Commits since previous published build"
+        elif git_returncode(worktree, "merge-base", "--is-ancestor", previous_commit, head) == 0:
+            log_args = ["log", f"{previous_commit}..{head}", "--pretty=format:%h%x00%s%x00%an%x00%aI"]
+            range_label = "Commits since previous published build"
+
+commit_log = run_git(worktree, *log_args) if log_args else ""
+commits = parse_commits(commit_log)
+
+metadata = {
+    "title": title,
+    "slug": slug,
+    "scheme": scheme,
+    "configuration": configuration,
+    "method": method,
+    "archiveID": archive_id,
+    "builtAt": built_at_iso,
+    "builtAtLabel": built_at_label,
+    "git": {
+        "worktree": worktree,
+        "branch": branch,
+        "commit": head,
+        "subject": subject,
+        "dirty": dirty,
+        "previousPublishedCommit": previous_commit,
+        "rangeLabel": range_label,
+        "commits": commits,
+    },
+}
+
+metadata_text = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+for directory in (release_public_dir, latest_public_dir):
+    (directory / "build-metadata.json").write_text(metadata_text, encoding="utf-8")
+    (directory / "build-details.html").write_text(details_html(metadata), encoding="utf-8")
+
+details_html_file.write_text(details_html(metadata), encoding="utf-8")
+
+history_items = []
+for release_dir in sorted((p for p in releases_root.iterdir() if p.is_dir()), reverse=True):
+    release_name = release_dir.name
+    release_metadata = load_metadata(release_dir / "build-metadata.json")
+    built_at = release_metadata.get("builtAt") or ""
+    built_label = release_metadata.get("builtAtLabel") or release_name
+    git = release_metadata.get("git") or {}
+    commit = git.get("commit") or ""
+    subject_text = git.get("subject") or ""
+    commit_html = f" · <code>{html.escape(commit[:8])}</code>" if commit else ""
+    subject_html = f" · {html.escape(subject_text)}" if subject_text else ""
+    if built_at:
+        age_html = f"<span data-built-at=\"{html.escape(built_at)}\">just now</span> · "
+    else:
+        age_html = ""
+    history_items.append(
+        f"  <li><a href=\"releases/{html.escape(release_name)}/\">{html.escape(release_name)}</a>"
+        f"<div class=\"archive-meta\">Built {age_html}{html.escape(built_label)}{commit_html}{subject_html}</div></li>"
+    )
+
+history_items_html_file.write_text("\n".join(history_items) + ("\n" if history_items else ""), encoding="utf-8")
+PY
+BUILD_DETAILS_HTML="$(cat "$BUILD_DETAILS_HTML_FILE")"
+history_items="$(cat "$HISTORY_ITEMS_HTML_FILE")"
+
 cat >"$RELEASE_PUBLIC_DIR/index.html" <<EOF
 <!doctype html>
 <html lang="en">
@@ -604,30 +886,21 @@ cat >"$RELEASE_PUBLIC_DIR/index.html" <<EOF
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
+    .freshness { color: #555; font-size: 0.95rem; margin-top: -2px; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
-    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
+$BUILD_PAGE_CSS
   </style>
-  <script>
-    function renderAge() {
-      document.querySelectorAll('[data-built-at]').forEach(function (node) {
-        var then = new Date(node.getAttribute('data-built-at')).getTime();
-        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
-        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
-        node.textContent = value;
-      });
-    }
-    window.addEventListener('load', renderAge);
-  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p><strong>Archived build:</strong> $TIMESTAMP</p>
-  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
-  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
+  <p>Archived build: $TIMESTAMP</p>
   <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="itms-services://?action=download-manifest&url=$RELEASE_MANIFEST_URL">Install this build</a></p>
+  $BUILD_FRESHNESS_HTML
+  $BUILD_DETAILS_HTML
   <p>Manifest: <code>$RELEASE_MANIFEST_URL</code></p>
   <p>IPA: <code>$RELEASE_APP_URL</code></p>
+  $BUILD_FRESHNESS_SCRIPT
 </body>
 </html>
 EOF
@@ -642,39 +915,24 @@ cat >"$PUBLIC_LATEST_ROOT/index.html" <<EOF
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
+    .freshness { color: #555; font-size: 0.95rem; margin-top: -2px; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
-    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
+$BUILD_PAGE_CSS
   </style>
-  <script>
-    function renderAge() {
-      document.querySelectorAll('[data-built-at]').forEach(function (node) {
-        var then = new Date(node.getAttribute('data-built-at')).getTime();
-        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
-        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
-        node.textContent = value;
-      });
-    }
-    window.addEventListener('load', renderAge);
-  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p><strong>Latest build:</strong> $TIMESTAMP</p>
-  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
-  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
+  <p>Latest good build alias.</p>
   <p>This is an Apple-signed developer build created on the developer's Mac with Xcode. Installation only succeeds on devices included in the selected Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
+  $BUILD_FRESHNESS_HTML
+  $BUILD_DETAILS_HTML
   <p>Manifest: <code>$MANIFEST_URL</code></p>
   <p>IPA: <code>$APP_URL</code></p>
+  $BUILD_FRESHNESS_SCRIPT
 </body>
 </html>
 EOF
-
-history_items=""
-while IFS= read -r release_dir; do
-  release_name="$(basename "$release_dir")"
-  history_items="${history_items}  <li><a href=\"releases/$release_name/\">$release_name</a></li>"$'\n'
-done < <(find "$PUBLIC_RELEASES_ROOT" -mindepth 1 -maxdepth 1 -type d | sort -r)
 
 cat >"$PUBLIC_PROJECT_ROOT/index.html" <<EOF
 <!doctype html>
@@ -686,34 +944,24 @@ cat >"$PUBLIC_PROJECT_ROOT/index.html" <<EOF
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 40px auto; max-width: 680px; padding: 0 16px; line-height: 1.5; }
     .button { display: inline-block; padding: 14px 18px; border-radius: 12px; text-decoration: none; background: #111; color: #fff; }
+    .freshness { color: #555; font-size: 0.95rem; margin-top: -2px; }
     code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
-    .note { border: 1px solid #111; padding: 12px 14px; margin: 16px 0; }
+$BUILD_PAGE_CSS
   </style>
-  <script>
-    function renderAge() {
-      document.querySelectorAll('[data-built-at]').forEach(function (node) {
-        var then = new Date(node.getAttribute('data-built-at')).getTime();
-        var seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
-        var value = seconds < 60 ? seconds + ' sec ago' : seconds < 3600 ? Math.floor(seconds / 60) + ' min ago' : Math.floor(seconds / 3600) + ' hr ago';
-        node.textContent = value;
-      });
-    }
-    window.addEventListener('load', renderAge);
-  </script>
 </head>
 <body>
   <h1>$TITLE</h1>
-  <p><strong>Latest build:</strong> $TIMESTAMP</p>
-  <p><strong>Built:</strong> $BUILT_HUMAN (<span data-built-at="$BUILT_ISO">just now</span>)</p>
-  <div class="note"><strong>Changed:</strong> $CHANGE_NOTE_HTML</div>
   <p>Open this page in Safari on the target iPhone, then tap install. This is not public app distribution: the IPA was built and signed on the developer's Mac, and iOS only installs it on devices included in the Apple provisioning profile.</p>
   <p><a class="button" href="$INSTALL_URL">Install latest build</a></p>
+  $BUILD_FRESHNESS_HTML
   <p>Latest manifest: <code>$MANIFEST_URL</code></p>
   <p>Latest IPA: <code>$APP_URL</code></p>
   <p><a href="$PUBLIC_BASE_URL/$SLUG/latest/">Open latest build page</a></p>
+  $BUILD_DETAILS_HTML
   <h2>Archive history</h2>
-  <ul>
+  <ul class="archive-list">
 $history_items  </ul>
+  $BUILD_FRESHNESS_SCRIPT
 </body>
 </html>
 EOF
