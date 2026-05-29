@@ -35,6 +35,7 @@ const CLAUDE_STALE_JOB_GRACE_MS = Number(process.env.CLAUDE_STALE_JOB_GRACE_MS |
 const sessionHistoryCache = new Map();
 const uploadedMediaCache = new Map();
 const activeClaudeJobIDs = new Set();
+const activeClaudeJobs = new Map();
 const claudeJobWaiters = new Map();
 
 const server = new WebSocket.Server({ host: LISTEN_HOST, port: LISTEN_PORT, perMessageDeflate: false });
@@ -1501,6 +1502,66 @@ function claudeJobStatus(params = {}) {
   };
 }
 
+function failClaudeJob(job, message) {
+  if (!job) return null;
+  job.status = 'failed';
+  job.error = message;
+  job.stderr = `${job.stderr || ''}\n${message}`.trim();
+  job.exitCode = -1;
+  job.completedAt = Date.now();
+  writeClaudeJob(job);
+  resolveClaudeJobWaiters(job);
+  return job;
+}
+
+function cancelClaudeJob(params = {}) {
+  const jobID = sanitizeClaudeJobID(params.jobId);
+  const threadID = typeof params.threadId === 'string' ? params.threadId.trim() : '';
+  const job = jobID ? readClaudeJob(jobID) : latestClaudeJobForThread(threadID);
+
+  if (!job) {
+    return { result: { found: false, cancelled: false, jobId: jobID || null, threadId: threadID || null } };
+  }
+
+  const active = activeClaudeJobs.get(job.jobId);
+  if (active?.child && !active.child.killed) {
+    try {
+      active.child.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (processIsAlive(active.child.pid)) {
+            active.child.kill('SIGKILL');
+          }
+        } catch (_) {}
+      }, 2000).unref();
+    } catch (_) {}
+  } else if (processIsAlive(job.pid)) {
+    try {
+      process.kill(job.pid, 'SIGTERM');
+      setTimeout(() => {
+        try {
+          if (processIsAlive(job.pid)) {
+            process.kill(job.pid, 'SIGKILL');
+          }
+        } catch (_) {}
+      }, 2000).unref();
+    } catch (_) {}
+  }
+
+  activeClaudeJobIDs.delete(job.jobId);
+  activeClaudeJobs.delete(job.jobId);
+  failClaudeJob(job, 'Claude job cancelled by user.');
+  return {
+    result: {
+      found: true,
+      cancelled: true,
+      active: false,
+      job: mobileClaudeJob(job),
+      ...claudeJobResult(job).result,
+    },
+  };
+}
+
 function runClaudeSend(params = {}) {
   return new Promise((resolve) => {
     const rawPrompt = typeof params.prompt === 'string' ? params.prompt : '';
@@ -1606,6 +1667,7 @@ function runClaudeSend(params = {}) {
     job.pid = child.pid || null;
     writeClaudeJob(job);
     activeClaudeJobIDs.add(jobId);
+    activeClaudeJobs.set(jobId, { child, job });
 
     const finish = (payload) => {
       if (settled) return;
@@ -1670,6 +1732,7 @@ function runClaudeSend(params = {}) {
       clearTimeout(timer);
       clearInterval(inactivityTimer);
       activeClaudeJobIDs.delete(jobId);
+      activeClaudeJobs.delete(jobId);
       job.status = 'failed';
       job.text = '';
       job.stdout = stdout;
@@ -1685,12 +1748,14 @@ function runClaudeSend(params = {}) {
       clearTimeout(timer);
       clearInterval(inactivityTimer);
       activeClaudeJobIDs.delete(jobId);
+      activeClaudeJobs.delete(jobId);
       if (stdoutRemainder.trim()) {
         handleClaudeStreamLine(stdoutRemainder.trim());
       }
       if (signal && code == null) {
         stderr = `${stderr}\nTerminated by signal ${signal}`.trim();
       }
+      const wasCancelled = job.error === 'Claude job cancelled by user.';
       const parsed = parseClaudeJsonLine(stdout.trim().split('\n').filter(Boolean).pop() || stdout.trim());
       const exitCode = inactivityTimedOut || hardTimedOut ? -1 : (Number.isInteger(code) ? code : -1);
       const extractedText = resultText || extractClaudeText(parsed, stdout);
@@ -1698,9 +1763,9 @@ function runClaudeSend(params = {}) {
       job.text = exitCode === 0 ? extractedText : (resultText || '');
       job.sessionId = streamSessionId || extractClaudeSessionID(parsed, stdout);
       job.stdout = stdout;
-      job.stderr = stderr;
+      job.stderr = wasCancelled ? `${stderr}\nClaude job cancelled by user.`.trim() : stderr;
       job.exitCode = exitCode;
-      job.error = exitCode === 0 ? '' : (stderr || `Claude exited with code ${exitCode}`);
+      job.error = wasCancelled ? 'Claude job cancelled by user.' : (exitCode === 0 ? '' : (stderr || `Claude exited with code ${exitCode}`));
       job.completedAt = Date.now();
       writeClaudeJob(job);
       resolveClaudeJobWaiters(job);
@@ -1801,6 +1866,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
     'local/claude/models',
     'local/claude/listSessions',
     'local/claude/archiveSession',
+    'local/claude/cancel',
     'local/claude/jobStatus',
     'local/claude/send',
   ].includes(incoming.method)) {
@@ -1832,10 +1898,12 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
                     ? listClaudeSessions(incoming.params || {})
                     : incoming.method === 'local/claude/archiveSession'
                       ? archiveClaudeSession(incoming.params || {})
-                      : incoming.method === 'local/claude/jobStatus'
-                        ? claudeJobStatus(incoming.params || {})
-                        : incoming.method === 'local/claude/send'
-                          ? await runClaudeSend(incoming.params || {})
+                      : incoming.method === 'local/claude/cancel'
+                        ? cancelClaudeJob(incoming.params || {})
+                        : incoming.method === 'local/claude/jobStatus'
+                          ? claudeJobStatus(incoming.params || {})
+                          : incoming.method === 'local/claude/send'
+                            ? await runClaudeSend(incoming.params || {})
         : await runLocalExec(incoming.params);
   if (client.readyState === WebSocket.OPEN) {
     const payload = {
@@ -1853,6 +1921,7 @@ async function handleLocalRPC(client, incoming, cid, localContext = {}) {
         'local/claude/models',
         'local/claude/listSessions',
         'local/claude/archiveSession',
+        'local/claude/cancel',
         'local/claude/jobStatus',
         'local/claude/send',
       ].includes(incoming.method)
