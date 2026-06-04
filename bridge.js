@@ -388,16 +388,24 @@ function extractSessionAttachments(content) {
         (typeof part.url === 'string' && part.url.trim()) ||
         null;
       if (!localPath && !remoteFileURL) continue;
+      const mimeType =
+        (typeof part.mimeType === 'string' && part.mimeType.trim()) ||
+        'application/octet-stream';
+      const filename =
+        (typeof part.filename === 'string' && part.filename.trim()) ||
+        path.basename(localPath || remoteFileURL) ||
+        'file';
+      const explicitKind = typeof part.kind === 'string' ? part.kind.trim().toLowerCase() : '';
+      const inferredKind = explicitKind || (mimeType.startsWith('video/')
+        ? 'video'
+        : mimeType.startsWith('image/')
+          ? 'image'
+          : 'file');
       attachments.push({
         id: attachmentID,
-        filename:
-          (typeof part.filename === 'string' && part.filename.trim()) ||
-          path.basename(localPath || remoteFileURL) ||
-          'file',
-        mimeType:
-          (typeof part.mimeType === 'string' && part.mimeType.trim()) ||
-          'application/octet-stream',
-        kind: 'file',
+        filename,
+        mimeType,
+        kind: ['image', 'video', 'file'].includes(inferredKind) ? inferredKind : 'file',
         ...(localPath ? { localPath } : {}),
         ...(remoteFileURL ? { remoteURL: remoteFileURL } : {}),
       });
@@ -1138,8 +1146,10 @@ function runClaudeModels() {
           claudeBin: CLAUDE_BIN,
           models: supportsModelFlag
             ? [
-                { id: 'opus', displayName: 'Opus', model: 'opus' },
-                { id: 'sonnet', displayName: 'Sonnet', model: 'sonnet' },
+                { id: 'opus', displayName: 'Opus (latest alias)', model: 'opus' },
+                { id: 'claude-opus-4-8', displayName: 'Opus 4.8', model: 'claude-opus-4-8' },
+                { id: 'claude-opus-4-7', displayName: 'Opus 4.7', model: 'claude-opus-4-7' },
+                { id: 'sonnet', displayName: 'Sonnet (latest alias)', model: 'sonnet' },
               ]
             : [],
         },
@@ -1486,6 +1496,12 @@ function reconcileClaudeJobForStatus(job) {
   return job;
 }
 
+function runningClaudeJobForThread(threadID) {
+  const job = reconcileClaudeJobForStatus(latestClaudeJobForThread(threadID));
+  if (!job || job.status !== 'running') return null;
+  return job;
+}
+
 function claudeJobStatus(params = {}) {
   const jobID = sanitizeClaudeJobID(params.jobId);
   const threadID = typeof params.threadId === 'string' ? params.threadId.trim() : '';
@@ -1604,6 +1620,22 @@ function runClaudeSend(params = {}) {
       existingJob.completedAt = Date.now();
       writeClaudeJob(existingJob);
       resolve(claudeJobResult(existingJob));
+      return;
+    }
+
+    const existingThreadJob = threadId ? runningClaudeJobForThread(threadId) : null;
+    if (existingThreadJob && existingThreadJob.jobId !== jobId) {
+      resolve({
+        error: {
+          code: -32080,
+          message: `Claude job already running for thread ${threadId}`,
+          data: {
+            jobId: existingThreadJob.jobId,
+            threadId,
+            status: existingThreadJob.status,
+          },
+        },
+      });
       return;
     }
 
