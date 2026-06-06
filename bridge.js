@@ -1481,7 +1481,7 @@ function reconcileClaudeJobForStatus(job) {
     return job;
   }
   const updatedAt = Number.isFinite(job.updatedAt) ? job.updatedAt : 0;
-  if (processIsAlive(job.pid) && Date.now() - updatedAt < 600000) {
+  if (processIsAlive(job.pid)) {
     return job;
   }
   if (Date.now() - updatedAt < CLAUDE_STALE_JOB_GRACE_MS) {
@@ -1588,11 +1588,11 @@ function runClaudeSend(params = {}) {
     const threadId = typeof params.threadId === 'string' && params.threadId.trim() ? params.threadId.trim() : null;
     const requestedJobID = sanitizeClaudeJobID(params.jobId);
     const jobId = requestedJobID || createClaudeJobID();
-    const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 1200000;
+    const timeoutMs = Number.isFinite(params.timeoutMs) ? Number(params.timeoutMs) : 0;
     const requestedInactivityTimeoutMs = Number.isFinite(params.inactivityTimeoutMs)
       ? Number(params.inactivityTimeoutMs)
-      : 600000;
-    const inactivityTimeoutMs = Math.max(600000, requestedInactivityTimeoutMs);
+      : 0;
+    const inactivityTimeoutMs = Math.max(0, requestedInactivityTimeoutMs);
     const permissionMode = typeof params.permissionMode === 'string' && params.permissionMode.trim()
       ? params.permissionMode.trim()
       : 'default';
@@ -1611,6 +1611,13 @@ function runClaudeSend(params = {}) {
       }
       if (activeClaudeJobIDs.has(jobId)) {
         waitForClaudeJob(jobId).then(resolve);
+        return;
+      }
+      if (processIsAlive(existingJob.pid)) {
+        existingJob.status = 'running';
+        existingJob.updatedAt = Date.now();
+        writeClaudeJob(existingJob);
+        resolve(claudeJobResult(existingJob));
         return;
       }
       existingJob.status = 'failed';
@@ -1711,20 +1718,20 @@ function runClaudeSend(params = {}) {
       finish(claudeJobResult(job));
     }
 
-    const timer = setTimeout(() => {
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       hardTimedOut = true;
       stderr += `\nTimed out after ${timeoutMs}ms`;
       child.kill('SIGTERM');
       setTimeout(() => child.kill('SIGKILL'), 2000).unref();
-    }, timeoutMs);
+    }, timeoutMs) : null;
 
-    const inactivityTimer = setInterval(() => {
+    const inactivityTimer = inactivityTimeoutMs > 0 ? setInterval(() => {
       if (Date.now() - lastProgressAt < inactivityTimeoutMs) return;
       inactivityTimedOut = true;
       stderr += `\nNo Claude output for ${inactivityTimeoutMs}ms`;
       child.kill('SIGTERM');
       setTimeout(() => child.kill('SIGKILL'), 2000).unref();
-    }, 5000);
+    }, 5000) : null;
 
     const handleClaudeStreamLine = (line) => {
       const parsed = parseClaudeJsonLine(line);
@@ -1761,8 +1768,8 @@ function runClaudeSend(params = {}) {
       }
     });
     child.on('error', (error) => {
-      clearTimeout(timer);
-      clearInterval(inactivityTimer);
+      if (timer) clearTimeout(timer);
+      if (inactivityTimer) clearInterval(inactivityTimer);
       activeClaudeJobIDs.delete(jobId);
       activeClaudeJobs.delete(jobId);
       job.status = 'failed';
@@ -1777,8 +1784,8 @@ function runClaudeSend(params = {}) {
       finish(claudeJobResult(job));
     });
     child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      clearInterval(inactivityTimer);
+      if (timer) clearTimeout(timer);
+      if (inactivityTimer) clearInterval(inactivityTimer);
       activeClaudeJobIDs.delete(jobId);
       activeClaudeJobs.delete(jobId);
       if (stdoutRemainder.trim()) {
