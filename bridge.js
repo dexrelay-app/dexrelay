@@ -2266,6 +2266,24 @@ function sanitizeThread(thread) {
   return next;
 }
 
+function sanitizeThreadListItem(item) {
+  if (!item || typeof item !== 'object') return item;
+  const next = { ...item };
+  delete next.turns;
+  delete next.messages;
+  delete next.history;
+  delete next.transcript;
+  for (const key of ['preview', 'name', 'title', 'explicitName', 'summary']) {
+    if (typeof next[key] === 'string') {
+      next[key] = truncateText(next[key], key === 'preview' ? 420 : 160);
+    }
+  }
+  if (next.extra && Buffer.byteLength(JSON.stringify(next.extra), 'utf8') > 4000) {
+    next.extra = null;
+  }
+  return next;
+}
+
 function threadSkeletonForMobile(thread) {
   if (!thread || typeof thread !== 'object') return { turns: [], mobileHistoryTrimmed: true };
   return {
@@ -2299,6 +2317,9 @@ function sanitizePayloadForMobile(payload) {
     if (Array.isArray(next.result.turns)) {
       next.result.turns = reduceThreadTurnsForMobile(next.result.turns);
     }
+    if (Array.isArray(next.result.data)) {
+      next.result.data = next.result.data.map(sanitizeThreadListItem).filter(Boolean);
+    }
   }
 
   if (next.params && typeof next.params === 'object') {
@@ -2314,6 +2335,9 @@ function sanitizePayloadForMobile(payload) {
     }
     if (Array.isArray(next.params.items)) {
       next.params.items = next.params.items.map(sanitizeItem).filter(Boolean).slice(-HISTORY_MAX_ITEMS);
+    }
+    if (Array.isArray(next.params.data)) {
+      next.params.data = next.params.data.map(sanitizeThreadListItem).filter(Boolean);
     }
   }
 
@@ -2783,16 +2807,28 @@ function createBridgeSession() {
     console.log(`${logPrefix()} upstream open (stdio)`);
     flush();
 
-    const rl = readline.createInterface({ input: upstream.stdout });
-    rl.on('line', (line) => {
-      let text = line;
-      try {
-        const payload = JSON.parse(line);
-        processIncomingPayload(payload);
-        text = serializeForMobile(payload);
-      } catch (_) {}
+    let pendingStdoutJSON = '';
+    const deliverParsedUpstreamPayload = (payload) => {
+      processIncomingPayload(payload);
+      const text = serializeForMobile(payload);
       recordFrame(text, false);
       deliverFrame(text, false);
+    };
+
+    const rl = readline.createInterface({ input: upstream.stdout });
+    rl.on('line', (line) => {
+      const candidate = pendingStdoutJSON ? `${pendingStdoutJSON}${line}` : line;
+      try {
+        const payload = JSON.parse(candidate);
+        pendingStdoutJSON = '';
+        deliverParsedUpstreamPayload(payload);
+      } catch (_) {
+        pendingStdoutJSON = candidate;
+        if (Buffer.byteLength(pendingStdoutJSON, 'utf8') > MAX_MESSAGE_BYTES * 8) {
+          console.log(`${logPrefix()} dropping incomplete upstream stdout JSON (${pendingStdoutJSON.length} chars)`);
+          pendingStdoutJSON = '';
+        }
+      }
     });
 
     upstream.stderr.on('data', (chunk) => {

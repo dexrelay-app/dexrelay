@@ -461,12 +461,28 @@ fi
 
 if [[ "$SHOULD_RESOLVE_PACKAGES" -eq 1 ]]; then
   echo "==> Resolving Swift packages"
-  xcodebuild \
-    -project "$PROJECT" \
-    -scheme "$SCHEME" \
-    -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" \
-    -skipPackageUpdates \
-    -resolvePackageDependencies
+  PACKAGE_RESOLVE_LOG="$(mktemp "${TMPDIR:-/tmp}/dexrelay-spm-resolve.XXXXXX.log")"
+  if ! xcodebuild \
+      -project "$PROJECT" \
+      -scheme "$SCHEME" \
+      -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" \
+      -skipPackageUpdates \
+      -resolvePackageDependencies 2>&1 | tee "$PACKAGE_RESOLVE_LOG"; then
+    if grep -Eiq "unable to read tree|check out revision|fatalError" "$PACKAGE_RESOLVE_LOG"; then
+      echo "==> Swift package cache looks corrupt; clearing DexRelay SPM cache and retrying once" >&2
+      rm -rf "$SPM_CACHE_DIR/checkouts" "$SPM_CACHE_DIR/repositories" "$SPM_CACHE_DIR/workspace-state.json"
+      mkdir -p "$SPM_CACHE_DIR"
+      xcodebuild \
+        -project "$PROJECT" \
+        -scheme "$SCHEME" \
+        -clonedSourcePackagesDirPath "$SPM_CACHE_DIR" \
+        -skipPackageUpdates \
+        -resolvePackageDependencies
+    else
+      exit 1
+    fi
+  fi
+  rm -f "$PACKAGE_RESOLVE_LOG"
   touch "$PACKAGE_RESOLUTION_STAMP"
 else
   echo "==> Reusing cached Swift packages"

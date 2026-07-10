@@ -6,24 +6,27 @@
 #   ensure_xcode_developer_dir
 
 ensure_xcode_developer_dir() {
-  if [[ -n "${DEVELOPER_DIR:-}" && -x "${DEVELOPER_DIR}/usr/bin/xcodebuild" ]]; then
-    return 0
-  fi
-
   local selected=""
   selected="$(xcode-select -p 2>/dev/null || true)"
 
   local candidates=()
+  if [[ -n "${DEXRELAY_XCODE_DEVELOPER_DIR:-}" ]]; then
+    candidates+=("$DEXRELAY_XCODE_DEVELOPER_DIR")
+  fi
+  candidates+=("/Applications/Xcode-26.5.app/Contents/Developer")
+  if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+    candidates+=("$DEVELOPER_DIR")
+  fi
   if [[ -n "$selected" ]]; then
     candidates+=("$selected")
   fi
   candidates+=("/Applications/Xcode.app/Contents/Developer")
 
   local app
-  for app in /Applications/Xcode*.app ~/Applications/Xcode*.app; do
+  while IFS= read -r app; do
     [[ -d "$app" ]] || continue
     candidates+=("$app/Contents/Developer")
-  done
+  done < <(find /Applications "$HOME/Applications" -maxdepth 1 -type d -name 'Xcode*.app' 2>/dev/null | sort)
 
   local seen=""
   local candidate=""
@@ -43,7 +46,7 @@ ensure_xcode_developer_dir() {
   cat >&2 <<'EOF'
 Unable to find a working Xcode developer directory.
 Install Xcode and set it as active, for example:
-  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  sudo xcode-select -s /Applications/Xcode-26.5.app/Contents/Developer
 EOF
   return 1
 }

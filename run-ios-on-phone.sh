@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=./xcode-devdir.sh
+if [[ -z "${DEXRELAY_XCODE_DEVELOPER_DIR:-}" && -d "/Applications/Xcode-beta.app/Contents/Developer" ]]; then
+  export DEXRELAY_XCODE_DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
+fi
 source "$SCRIPT_DIR/xcode-devdir.sh"
 ensure_xcode_developer_dir
 
