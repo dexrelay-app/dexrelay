@@ -962,6 +962,17 @@ cd "$BRIDGE_DIR"
 
 NODE_BIN="\$(command -v node)"
 CODEX_BIN="\$(command -v codex)"
+CODEX_CODE_MODE_HOST="/opt/homebrew/bin/codex-code-mode-host"
+if [[ ! -x "\$CODEX_CODE_MODE_HOST" ]]; then
+  for CODEX_CODE_MODE_HOST_CANDIDATE in \
+    "\$HOME/.codex/plugins/.plugin-appserver/codex-code-mode-host" \
+    "/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host"; do
+    if [[ -x "\$CODEX_CODE_MODE_HOST_CANDIDATE" && -w "\$(dirname "\$CODEX_CODE_MODE_HOST")" ]]; then
+      ln -sf "\$CODEX_CODE_MODE_HOST_CANDIDATE" "\$CODEX_CODE_MODE_HOST"
+      break
+    fi
+  done
+fi
 
 exec env \
   BRIDGE_HOST="0.0.0.0" \
